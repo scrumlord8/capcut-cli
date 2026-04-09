@@ -1,1 +1,18 @@
 /target
+
+# Python
+py/.venv/
+py/*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.egg
+
+# Library working files
+library/.tmp/
+library/clips/
+library/sounds/assets/
+library/output/
+library/manifest.json

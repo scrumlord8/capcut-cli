@@ -2,133 +2,154 @@
 
 An open source, agent-first video editing CLI for generating short social clips without touching a timeline.
 
-## What this is
+## What this does
 
-`capcut-cli` is a Rust project for agents that need to assemble short-form videos programmatically.
+`capcut-cli` lets an agent (or human) discover trending audio, pull viral video clips, and compose them into short-form videos — all from the command line, all with structured JSON output.
 
-The goal is not to recreate a full nonlinear editor. The goal is to expose the primitives an agent actually needs:
+**This is a working MVP, not a scaffold.** Every command below actually runs.
 
-- discover and collect candidate media
-- ingest audio and video assets into a local library
-- trim and normalize clips
-- align visuals to audio
-- compose short videos from reusable pipelines
-- export social-ready outputs for surfaces like Twitter/X
-- operate entirely from a command line interface
+## Quick start
 
-## Project goals
+```bash
+cd py
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && pip install -e .
 
-This project starts from four immediate requirements:
+# Install dependencies (yt-dlp + ffmpeg)
+capcut-cli deps install
 
-1. Research how to pull trending sounds from TikTok programmatically
-2. Research how to pull viral video clips from Twitter/X
-3. Build a prototype that combines trending audio with relevant video into short clips suitable for posting on Twitter/X
-4. Package the whole thing as an agent-first CLI
+# Discover trending TikTok sounds
+capcut-cli discover tiktok-sounds --limit 5
 
-## Design principles
+# Import a sound
+capcut-cli library import "https://www.tiktok.com/music/..." --type sound
 
-### Agent-first
+# Import a video clip
+capcut-cli library import "https://x.com/user/status/123" --type clip
 
-Every important action should be scriptable, composable, and inspectable.
+# List your library
+capcut-cli library list
 
-That means:
+# Compose a video: sound + clip → MP4
+capcut-cli compose --sound snd_abc123 --clip clp_def456 --duration 15
+```
 
-- stable CLI commands
-- machine-readable JSON output where useful
-- predictable file layouts
-- explicit inputs and outputs
-- no GUI dependency
-- no hidden timeline state
+## CLI commands
 
-### Library-backed
+### `deps` — Manage dependencies
 
-Part of this repository will become a large library of sounds and clips.
+```bash
+capcut-cli deps install    # Download yt-dlp binary + verify ffmpeg
+capcut-cli deps check      # Verify all deps are available
+```
 
-The CLI should eventually manage:
+### `discover` — Find trending content
 
-- metadata for downloaded and curated sounds
-- metadata for source clips
-- tags, themes, and semantic relevance
-- deduplication
-- provenance tracking
-- prepared intermediates for fast recomposition
+```bash
+# Trending TikTok sounds (scraped from Creative Center)
+capcut-cli discover tiktok-sounds --limit 10 --region US
 
-### Rust core
+# Viral X/Twitter clips (generates search URLs with engagement filters)
+capcut-cli discover x-clips --query "ai agents" --limit 10 --min-likes 1000
+```
 
-Rust is the implementation language for reliability, portability, and strong CLI ergonomics.
+### `library` — Manage assets
 
-Likely building blocks include:
+```bash
+# Import from any supported URL (TikTok, X/Twitter, YouTube, etc.)
+capcut-cli library import <url> --type sound --tags "trending,tiktok"
+capcut-cli library import <url> --type clip --tags "viral,ai"
 
-- `clap` for CLI structure
-- `serde` and `serde_json` for config and machine-readable output
-- `tokio` for async network and pipeline orchestration
-- `reqwest` for HTTP/API access
-- `ffmpeg` invoked as a system dependency for actual media transforms
+# Browse your library
+capcut-cli library list                # All assets
+capcut-cli library list --type sound   # Sounds only
+capcut-cli library show <asset_id>     # Asset details
+capcut-cli library delete <asset_id>   # Remove asset
+```
 
-## Proposed shape
+### `compose` — Render videos
 
-### Commands
+```bash
+capcut-cli compose \
+  --sound snd_abc123 \
+  --clip clp_def456 \
+  --clip clp_ghi789 \
+  --duration 20 \
+  --resolution 1080x1920
+```
 
-Possible early command surface:
+The compose pipeline:
+1. Normalizes audio loudness (target -14 LUFS)
+2. Trims audio to target duration
+3. Scales and center-crops each clip to target resolution
+4. Concatenates clips (loops single clips to fill duration)
+5. Muxes audio + video into final MP4
 
-- `capcut-cli research tiktok-sounds`
-- `capcut-cli research twitter-clips`
-- `capcut-cli library import-sound`
-- `capcut-cli library import-clip`
-- `capcut-cli compose short`
-- `capcut-cli export twitter`
+Output: a real, playable MP4 file.
 
-### Repository layout
+## Agent-first design
 
-Possible initial layout:
+Every command outputs structured JSON to stdout:
 
-- `src/cli/` for command definitions
-- `src/research/` for source-specific acquisition logic
-- `src/library/` for asset registry and metadata
-- `src/media/` for ffmpeg pipeline generation
-- `src/compose/` for clip assembly logic
-- `library/` for local asset manifests and indexes
-- `notes/` for ongoing research findings
+```json
+{
+  "status": "ok",
+  "command": "library list",
+  "data": { ... },
+  "errors": [],
+  "meta": { "version": "0.1.0", "duration_ms": 42 }
+}
+```
 
-## Immediate next steps
+- **stdout** = structured JSON (for agents to parse)
+- **stderr** = human-readable progress logs
+- **exit codes**: 0 = success, 1 = user error, 2 = missing dependency
+- **errors include hints**: not just "failed" but "failed because X, try Y"
+- **all file paths are absolute** so agents can use them directly
 
-- put up this README
-- research the acquisition paths for TikTok sounds and Twitter/X clips
-- map the legal and technical constraints around each source
-- sketch the MVP architecture
-- build the first committed sound library deliverable
-- post progress updates as the work becomes concrete
+## Architecture
 
-## First deliverable
+```
+py/capcut_cli/
+  cli.py              # Click command tree
+  config.py           # Paths and constants
+  models.py           # Asset, TrendingSound, ComposeResult
+  output.py           # JSON envelope wrapper
+  discover/
+    tiktok.py          # Creative Center page scraping
+    twitter.py         # Search URL generation
+  library/
+    store.py           # Filesystem + JSON manifest storage
+  media/
+    downloader.py      # yt-dlp subprocess wrapper
+    ffmpeg.py          # ffmpeg subprocess wrappers
+    compose.py         # Render pipeline
+  deps/
+    bootstrap.py       # yt-dlp binary download, ffmpeg check
+```
 
-The first concrete deliverable is a committed library of popular TikTok sounds, plus a pipeline for adding more over time.
+## Dependencies
 
-That means:
+- **Python 3.9+**
+- **yt-dlp** (standalone binary, auto-downloaded by `deps install`)
+- **ffmpeg** (bundled via `imageio-ffmpeg` pip package)
+- **httpx** — HTTP client for discovery scraping
+- **beautifulsoup4** — HTML parsing for TikTok Creative Center
+- **click** — CLI framework
 
-- committed sound metadata in the repo
-- committed sample audio files for preview and feedback
-- a documented acquisition pipeline
-- CLI primitives that will eventually automate discovery and refresh
+## Supported platforms for import
+
+| Platform | Sound | Clip | Notes |
+|----------|-------|------|-------|
+| TikTok | Yes | Yes | May need `--cookies-from-browser` if IP-blocked |
+| X/Twitter | Yes | Yes | yt-dlp handles download |
+| YouTube | Yes | Yes | Full support |
+| Instagram | Yes | Yes | Via yt-dlp |
 
 ## Status
 
-Day one, but no longer just a placeholder.
-
-Current state:
-
-- README and initial research notes are in place
-- first Rust CLI scaffold exists
-- commands now emit structured JSON for discovery, library planning, and composition planning
-- next step is wiring real source adapters and ffmpeg-backed rendering
-
-## Current CLI surface
-
-```bash
-capcut-cli discover tiktok-sounds --limit 10
-capcut-cli discover x-clips --query "ai agents" --limit 10
-capcut-cli library sound --from <url-or-provider> --id <optional-id>
-capcut-cli library clip --from <url-or-provider> --id <optional-id>
-capcut-cli compose --sound sound_123 --clip clip_a --clip clip_b --duration-seconds 30
-```
-
-Each command currently returns machine-readable JSON so an agent can inspect the plan before the implementation becomes fully operational.
+**Working MVP.** The full pipeline is operational:
+- Discover trending TikTok sounds (live data from Creative Center)
+- Generate X/Twitter search queries with engagement filters
+- Download sounds and clips from any yt-dlp-supported URL
+- Compose real MP4 videos with normalized audio + scaled/cropped clips
