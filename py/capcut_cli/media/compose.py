@@ -3,11 +3,28 @@ import shutil
 import uuid
 from pathlib import Path
 
-from capcut_cli.config import OUTPUT_DIR, TMP_DIR
+from capcut_cli.config import OUTPUT_DIR, TMP_DIR, LOUDNESS_PRESETS, DEFAULT_LOUDNESS
 from capcut_cli.library.store import get_asset
 from capcut_cli.media import ffmpeg
 from capcut_cli.models import ComposeResult
 from capcut_cli import output as out
+
+
+def resolve_loudness(preset: str | None) -> dict:
+    """Resolve a loudness preset name to its parameters."""
+    name = preset or DEFAULT_LOUDNESS
+    if name in LOUDNESS_PRESETS:
+        return LOUDNESS_PRESETS[name]
+    # Allow raw LUFS value like "-8" or "-14.0"
+    try:
+        lufs = float(name)
+        return {"lufs": lufs, "tp": -1.0, "lra": 9, "label": f"custom ({lufs} LUFS)"}
+    except ValueError:
+        available = ", ".join(LOUDNESS_PRESETS.keys())
+        raise RuntimeError(
+            f"Unknown loudness preset '{name}'. "
+            f"Available: {available} — or pass a numeric LUFS value (e.g. -10)."
+        )
 
 
 def run_compose(
@@ -16,6 +33,7 @@ def run_compose(
     duration_seconds: float = 30.0,
     output_path: str = None,
     resolution: str = "1080x1920",
+    loudness: str = None,
 ) -> ComposeResult:
     """Run the full composition pipeline."""
     # Parse resolution
@@ -41,10 +59,16 @@ def run_compose(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Step 1: Normalize audio
-        out.log("Step 1/5: Normalizing audio...")
+        # Step 1: Normalize audio to target loudness
+        loud = resolve_loudness(loudness)
+        out.log(f"Step 1/5: Normalizing audio to {loud['lufs']} LUFS ({loud['label']})...")
         normalized_audio = str(work_dir / "audio_normalized.mp3")
-        ffmpeg.normalize_audio(sound.file_path, normalized_audio)
+        ffmpeg.normalize_audio(
+            sound.file_path, normalized_audio,
+            target_lufs=loud["lufs"],
+            true_peak=loud["tp"],
+            loudness_range=loud["lra"],
+        )
 
         # Step 2: Trim audio to target duration
         out.log("Step 2/5: Trimming audio...")

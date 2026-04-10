@@ -36,12 +36,17 @@ def get_duration(file_path: str) -> float:
     return 0.0
 
 
-def normalize_audio(input_path: str, output_path: str, target_lufs: float = -14.0):
-    """Loudness-normalize audio using two-pass loudnorm."""
-    # Single-pass loudnorm (good enough for MVP)
+def normalize_audio(
+    input_path: str,
+    output_path: str,
+    target_lufs: float = -8.0,
+    true_peak: float = -1.0,
+    loudness_range: float = 7,
+):
+    """Loudness-normalize audio using loudnorm filter."""
     _run_ffmpeg([
         "-i", input_path,
-        "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+        "-af", f"loudnorm=I={target_lufs}:TP={true_peak}:LRA={loudness_range}",
         "-ar", "44100",
         "-y", output_path,
     ])

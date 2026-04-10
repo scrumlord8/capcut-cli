@@ -174,7 +174,10 @@ def library_delete(asset_id):
 @click.option("--duration", "duration_seconds", type=float, default=30.0, help="Output duration in seconds.")
 @click.option("--output", "output_path", default=None, help="Output file path. Auto-generated if omitted.")
 @click.option("--resolution", default="1080x1920", help="Output resolution WxH (default: vertical 1080x1920).")
-def compose(sound, clips, duration_seconds, output_path, resolution):
+@click.option("--loudness", default=None,
+              help="Loudness preset or LUFS value. Presets: viral (-8 LUFS, default), "
+                   "social (-10), podcast (-14), broadcast (-23). Or pass a number like -12.")
+def compose(sound, clips, duration_seconds, output_path, resolution, loudness):
     """Compose clips with a sound into a final video."""
     from capcut_cli.media.compose import run_compose
     from capcut_cli.config import ensure_dirs
@@ -187,6 +190,7 @@ def compose(sound, clips, duration_seconds, output_path, resolution):
             duration_seconds=duration_seconds,
             output_path=output_path,
             resolution=resolution,
+            loudness=loudness,
         )
         output.emit(output.success("compose", result.to_dict(), t))
     except Exception as e:
