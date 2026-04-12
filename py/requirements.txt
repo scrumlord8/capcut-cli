@@ -1,4 +1,0 @@
-click==8.1.8
-httpx>=0.24,<1.0
-beautifulsoup4>=4.12
-imageio-ffmpeg>=0.5.1

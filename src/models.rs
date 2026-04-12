@@ -1,56 +1,46 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
-#[serde(tag = "report", rename_all = "snake_case")]
-pub enum AppReport {
-    Discovery(DiscoveryReport),
-    Library(LibraryReport),
-    Media(MediaReport),
-}
-
-#[derive(Debug, Serialize)]
-pub struct DiscoveryReport {
-    pub source: DiscoverSource,
-    pub query: Option<String>,
-    pub limit: u32,
-    pub notes: Vec<String>,
-    pub next_steps: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiscoverSource {
-    TiktokSounds,
-    XClips,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LibraryReport {
+/// An imported asset (sound or clip) in the library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Asset {
+    pub id: String,
+    #[serde(rename = "type")]
     pub asset_type: String,
-    pub source: Option<String>,
-    pub id: Option<String>,
-    pub required_metadata: Vec<String>,
+    pub title: String,
+    pub source_url: String,
+    pub source_platform: String,
+    pub downloaded_at: String,
+    pub duration_seconds: f64,
+    pub file_path: String,
+    pub file_size_bytes: u64,
+    pub format: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
+/// Result of the compose pipeline.
 #[derive(Debug, Serialize)]
-pub struct MediaReport {
+pub struct ComposeResult {
+    pub output_path: String,
+    pub duration_seconds: f64,
+    pub file_size_bytes: u64,
     pub sound_id: String,
     pub clip_ids: Vec<String>,
-    pub duration_seconds: u32,
-    pub pipeline: Vec<PipelineStep>,
+    pub resolution: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct PipelineStep {
-    pub kind: PipelineStepKind,
-    pub description: String,
+/// JSON manifest for the library.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Manifest {
+    pub version: u32,
+    pub assets: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PipelineStepKind {
-    NormalizeAudio,
-    TrimClips,
-    ScaleAndCrop,
-    Mux,
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            assets: vec![],
+        }
+    }
 }

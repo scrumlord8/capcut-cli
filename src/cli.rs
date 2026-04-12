@@ -1,10 +1,8 @@
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
+use std::time::Instant;
 
-use crate::models::{
-    AppReport, DiscoverSource, DiscoveryReport, LibraryReport, MediaReport, PipelineStep,
-    PipelineStepKind,
-};
+use crate::{config, deps, discover, library, media, output};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -17,181 +15,363 @@ pub struct Cli {
     command: Command,
 }
 
-impl Cli {
-    pub fn run(self) -> Result<()> {
-        let report = match self.command {
-            Command::Discover(args) => args.run(),
-            Command::Library(args) => args.run(),
-            Command::Compose(args) => args.run(),
-        }?;
-
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        Ok(())
-    }
-}
-
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage dependencies (yt-dlp, ffmpeg).
+    Deps(DepsArgs),
+    /// Discover trending sounds and viral clips.
     Discover(DiscoverArgs),
+    /// Manage the local asset library.
     Library(LibraryArgs),
+    /// Compose clips with a sound into a final video.
     Compose(ComposeArgs),
 }
 
-#[derive(Debug, Args)]
-struct DiscoverArgs {
-    #[arg(value_enum)]
-    source: DiscoverSourceArg,
-
-    #[arg(long)]
-    query: Option<String>,
-
-    #[arg(long, default_value_t = 10)]
-    limit: u32,
-}
-
-impl DiscoverArgs {
-    fn run(self) -> Result<AppReport> {
-        let (mode, notes, next_steps) = match self.source {
-            DiscoverSourceArg::TiktokSounds => (
-                DiscoverSource::TiktokSounds,
-                vec![
-                    "Official TikTok APIs are weak for trending sound discovery".to_string(),
-                    "MVP should use provider adapters, scraper adapters, or import mode".to_string(),
-                    "Keep direct scraping optional because anti-bot measures will change".to_string(),
-                ],
-                vec![
-                    "Add provider adapters with consistent normalized sound metadata".to_string(),
-                    "Support import by sound URL or sound ID for manual seeding".to_string(),
-                ],
-            ),
-            DiscoverSourceArg::XClips => (
-                DiscoverSource::XClips,
-                vec![
-                    "Prototype discovery via X search plus engagement metrics".to_string(),
-                    "Require attached video media and rank by likes, reposts, replies, quotes, views, and recency".to_string(),
-                    "Media retrieval may still require a separate downloader/import adapter".to_string(),
-                ],
-                vec![
-                    "Add X API credential support and search adapters".to_string(),
-                    "Add downloader abstraction for video asset retrieval".to_string(),
-                ],
-            ),
-        };
-
-        Ok(AppReport::Discovery(DiscoveryReport {
-            source: mode,
-            query: self.query,
-            limit: self.limit,
-            notes,
-            next_steps,
-        }))
-    }
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-enum DiscoverSourceArg {
-    #[value(name = "tiktok-sounds")]
-    TiktokSounds,
-    #[value(name = "x-clips")]
-    XClips,
-}
-
-#[derive(Debug, Args)]
-struct LibraryArgs {
-    #[arg(value_enum)]
-    asset_type: AssetTypeArg,
-
-    #[arg(long)]
-    from: Option<String>,
-
-    #[arg(long)]
-    id: Option<String>,
-}
-
-impl LibraryArgs {
-    fn run(self) -> Result<AppReport> {
-        Ok(AppReport::Library(LibraryReport {
-            asset_type: self.asset_type.as_str().to_string(),
-            source: self.from,
-            id: self.id,
-            required_metadata: match self.asset_type {
-                AssetTypeArg::Sound => vec![
-                    "source_url".to_string(),
-                    "platform".to_string(),
-                    "duration_seconds".to_string(),
-                    "creator".to_string(),
-                    "license_or_rights_note".to_string(),
-                    "local_audio_path".to_string(),
-                ],
-                AssetTypeArg::Clip => vec![
-                    "source_url".to_string(),
-                    "platform".to_string(),
-                    "duration_seconds".to_string(),
-                    "topic_tags".to_string(),
-                    "engagement_metrics".to_string(),
-                    "local_video_path".to_string(),
-                ],
-            },
-        }))
-    }
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-enum AssetTypeArg {
-    Sound,
-    Clip,
-}
-
-impl AssetTypeArg {
-    fn as_str(&self) -> &'static str {
-        match self {
-            AssetTypeArg::Sound => "sound",
-            AssetTypeArg::Clip => "clip",
+impl Cli {
+    pub fn run(self) -> Result<()> {
+        match self.command {
+            Command::Deps(args) => args.run(),
+            Command::Discover(args) => args.run(),
+            Command::Library(args) => args.run(),
+            Command::Compose(args) => args.run(),
         }
     }
 }
 
+// ── deps ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+struct DepsArgs {
+    #[command(subcommand)]
+    action: DepsAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum DepsAction {
+    /// Check if all dependencies are installed.
+    Check,
+    /// Download and install all dependencies.
+    Install,
+}
+
+impl DepsArgs {
+    fn run(self) -> Result<()> {
+        match self.action {
+            DepsAction::Check => {
+                let t = Instant::now();
+                let result = deps::check_all();
+                let all_ok = result
+                    .as_object()
+                    .map(|m| {
+                        m.values()
+                            .all(|v| v.get("installed").and_then(|i| i.as_bool()).unwrap_or(false))
+                    })
+                    .unwrap_or(false);
+
+                if all_ok {
+                    output::emit(&output::success("deps check", result, Some(t)));
+                } else {
+                    let mut env = output::error(
+                        "deps check",
+                        "MISSING_DEPS",
+                        "Some dependencies are not installed.",
+                        Some("Run 'capcut-cli deps install' to install them."),
+                    );
+                    env.data = result;
+                    output::emit(&env);
+                    std::process::exit(2);
+                }
+            }
+            DepsAction::Install => {
+                let t = Instant::now();
+                config::ensure_dirs();
+                output::log("Installing dependencies...");
+                match deps::install_all() {
+                    Ok(result) => {
+                        output::emit(&output::success("deps install", result, Some(t)));
+                    }
+                    Err(e) => {
+                        output::emit(&output::error(
+                            "deps install",
+                            "INSTALL_FAILED",
+                            &e.to_string(),
+                            None,
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── discover ────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+struct DiscoverArgs {
+    #[command(subcommand)]
+    action: DiscoverAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum DiscoverAction {
+    /// Find currently trending TikTok sounds.
+    #[command(name = "tiktok-sounds")]
+    TiktokSounds {
+        /// Max results to return.
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+        /// Region code.
+        #[arg(long, default_value = "US")]
+        region: String,
+    },
+    /// Find viral video clips on X/Twitter.
+    #[command(name = "x-clips")]
+    XClips {
+        /// Search query for viral clips.
+        #[arg(long)]
+        query: String,
+        /// Max results.
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+        /// Minimum likes filter.
+        #[arg(long, default_value_t = 1000)]
+        min_likes: u64,
+    },
+}
+
+impl DiscoverArgs {
+    fn run(self) -> Result<()> {
+        match self.action {
+            DiscoverAction::TiktokSounds { limit, region } => {
+                let t = Instant::now();
+                match discover::tiktok::find_trending_sounds(limit, &region) {
+                    Ok(data) => {
+                        output::emit(&output::success("discover tiktok-sounds", data, Some(t)));
+                    }
+                    Err(e) => {
+                        output::emit(&output::error(
+                            "discover tiktok-sounds",
+                            "DISCOVERY_FAILED",
+                            &e.to_string(),
+                            Some(
+                                "TikTok endpoints may be rate-limited. Try again later or import \
+                                 sounds manually with 'capcut-cli library import <url>'.",
+                            ),
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+            DiscoverAction::XClips {
+                query,
+                limit,
+                min_likes,
+            } => {
+                let t = Instant::now();
+                match discover::twitter::find_viral_clips(&query, limit, min_likes) {
+                    Ok(data) => {
+                        output::emit(&output::success("discover x-clips", data, Some(t)));
+                    }
+                    Err(e) => {
+                        output::emit(&output::error(
+                            "discover x-clips",
+                            "DISCOVERY_FAILED",
+                            &e.to_string(),
+                            None,
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── library ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+struct LibraryArgs {
+    #[command(subcommand)]
+    action: LibraryAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum LibraryAction {
+    /// Download a sound or clip from a URL into the library.
+    Import {
+        /// URL to import.
+        url: String,
+        /// Asset type. Auto-detected from URL if omitted.
+        #[arg(long = "type")]
+        asset_type: Option<String>,
+        /// Comma-separated tags.
+        #[arg(long, default_value = "")]
+        tags: String,
+    },
+    /// List all assets in the library.
+    List {
+        /// Filter by type.
+        #[arg(long = "type")]
+        asset_type: Option<String>,
+    },
+    /// Show details of a specific asset.
+    Show {
+        /// Asset ID.
+        asset_id: String,
+    },
+    /// Remove an asset from the library.
+    Delete {
+        /// Asset ID.
+        asset_id: String,
+    },
+}
+
+impl LibraryArgs {
+    fn run(self) -> Result<()> {
+        match self.action {
+            LibraryAction::Import {
+                url,
+                asset_type,
+                tags,
+            } => {
+                let t = Instant::now();
+                config::ensure_dirs();
+                let tag_list: Vec<String> = tags
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                match library::import_asset(&url, asset_type.as_deref(), &tag_list) {
+                    Ok(asset) => {
+                        let data = serde_json::to_value(&asset)?;
+                        output::emit(&output::success("library import", data, Some(t)));
+                    }
+                    Err(e) => {
+                        output::emit(&output::error(
+                            "library import",
+                            "IMPORT_FAILED",
+                            &e.to_string(),
+                            Some("Run 'capcut-cli deps check' to verify yt-dlp is installed."),
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+            LibraryAction::List { asset_type } => {
+                let t = Instant::now();
+                let assets = library::list_assets(asset_type.as_deref())?;
+                let data = serde_json::json!({
+                    "count": assets.len(),
+                    "assets": assets.iter().map(|a| serde_json::to_value(a).unwrap()).collect::<Vec<_>>(),
+                });
+                output::emit(&output::success("library list", data, Some(t)));
+            }
+            LibraryAction::Show { asset_id } => {
+                let t = Instant::now();
+                match library::get_asset(&asset_id)? {
+                    Some(asset) => {
+                        let data = serde_json::to_value(&asset)?;
+                        output::emit(&output::success("library show", data, Some(t)));
+                    }
+                    None => {
+                        output::emit(&output::error(
+                            "library show",
+                            "NOT_FOUND",
+                            &format!("Asset '{asset_id}' not found."),
+                            Some("Run 'capcut-cli library list' to see available assets."),
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+            LibraryAction::Delete { asset_id } => {
+                let t = Instant::now();
+                match library::delete_asset(&asset_id) {
+                    Ok(()) => {
+                        output::emit(&output::success(
+                            "library delete",
+                            serde_json::json!({"deleted": asset_id}),
+                            Some(t),
+                        ));
+                    }
+                    Err(e) => {
+                        output::emit(&output::error(
+                            "library delete",
+                            "DELETE_FAILED",
+                            &e.to_string(),
+                            None,
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── compose ─────────────────────────────────────────────────────────
+
 #[derive(Debug, Args)]
 struct ComposeArgs {
+    /// Sound asset ID from the library.
     #[arg(long)]
     sound: String,
 
+    /// Clip asset ID (repeatable).
     #[arg(long = "clip", required = true)]
     clips: Vec<String>,
 
-    #[arg(long, default_value_t = 30)]
-    duration_seconds: u32,
+    /// Output duration in seconds.
+    #[arg(long, default_value_t = 30.0)]
+    duration: f64,
+
+    /// Output file path. Auto-generated if omitted.
+    #[arg(long)]
+    output: Option<String>,
+
+    /// Output resolution WxH (default: vertical 1080x1920).
+    #[arg(long, default_value = "1080x1920")]
+    resolution: String,
+
+    /// Loudness preset or LUFS value. Presets: viral (-8, default),
+    /// social (-10), podcast (-14), broadcast (-23). Or pass a number like -12.
+    #[arg(long)]
+    loudness: Option<String>,
 }
 
 impl ComposeArgs {
-    fn run(self) -> Result<AppReport> {
-        Ok(AppReport::Media(MediaReport {
-            sound_id: self.sound,
-            clip_ids: self.clips,
-            duration_seconds: self.duration_seconds,
-            pipeline: vec![
-                PipelineStep {
-                    kind: PipelineStepKind::NormalizeAudio,
-                    description: "Normalize imported sound to a consistent loudness target"
-                        .to_string(),
-                },
-                PipelineStep {
-                    kind: PipelineStepKind::TrimClips,
-                    description: "Trim or subclip candidate visuals to fit target duration"
-                        .to_string(),
-                },
-                PipelineStep {
-                    kind: PipelineStepKind::ScaleAndCrop,
-                    description: "Scale and crop footage into target social aspect ratio"
-                        .to_string(),
-                },
-                PipelineStep {
-                    kind: PipelineStepKind::Mux,
-                    description:
-                        "Mux selected visuals with normalized audio into the final short clip"
-                            .to_string(),
-                },
-            ],
-        }))
+    fn run(self) -> Result<()> {
+        let t = Instant::now();
+        config::ensure_dirs();
+        match media::compose::run_compose(
+            &self.sound,
+            &self.clips,
+            self.duration,
+            self.output.as_deref(),
+            &self.resolution,
+            self.loudness.as_deref(),
+        ) {
+            Ok(result) => {
+                let data = serde_json::to_value(&result)?;
+                output::emit(&output::success("compose", data, Some(t)));
+            }
+            Err(e) => {
+                output::emit(&output::error(
+                    "compose",
+                    "COMPOSE_FAILED",
+                    &e.to_string(),
+                    Some(
+                        "Ensure assets exist with 'capcut-cli library list' and deps are \
+                         installed with 'capcut-cli deps check'.",
+                    ),
+                ));
+                std::process::exit(1);
+            }
+        }
+        Ok(())
     }
 }
