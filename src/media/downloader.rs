@@ -495,4 +495,28 @@ mod tests {
         assert!(redacted.contains("refresh_token=REDACTED"));
         assert!(!redacted.contains("refresh_token=abc"));
     }
+
+    #[test]
+    fn test_detect_platform_recognizes_manual_url_sources() {
+        assert_eq!(
+            detect_platform("https://www.youtube.com/watch?v=abc123"),
+            "youtube"
+        );
+        assert_eq!(
+            detect_platform("https://x.com/openai/status/123"),
+            "twitter"
+        );
+    }
+
+    #[test]
+    fn test_detect_asset_type_respects_explicit_sound_for_manual_urls() {
+        assert_eq!(
+            detect_asset_type("https://www.youtube.com/watch?v=abc123", Some("sound")),
+            "sound"
+        );
+        assert_eq!(
+            detect_asset_type("https://www.youtube.com/watch?v=abc123", Some("clip")),
+            "clip"
+        );
+    }
 }

@@ -1,11 +1,13 @@
 use anyhow::{bail, Result};
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+use crate::library;
+use crate::media::downloader;
 use crate::output;
 
 const RESEARCH_API_URL: &str = "https://open.tiktokapis.com/v2/research/video/query/";
@@ -20,6 +22,49 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 const RESEARCH_FIELDS: &str = "id,create_time,region_code,video_description,music_id,like_count,comment_count,share_count,view_count,username,video_duration";
 const RESEARCH_PAGE_SIZE: u32 = 100;
 const RESEARCH_SAMPLE_CAP: u32 = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundDiscoveryStrategy {
+    Auto,
+    Research,
+    CreativeCenter,
+    Library,
+    ManualUrl,
+}
+
+impl SoundDiscoveryStrategy {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "research" => Ok(Self::Research),
+            "creative-center" | "creative_center" | "creativecenter" => Ok(Self::CreativeCenter),
+            "library" => Ok(Self::Library),
+            "manual-url" | "manual_url" | "manual" => Ok(Self::ManualUrl),
+            other => bail!(
+                "Unknown TikTok sound discovery strategy '{other}'. Available: auto, research, creative-center, library, manual-url."
+            ),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Research => "research",
+            Self::CreativeCenter => "creative-center",
+            Self::Library => "library",
+            Self::ManualUrl => "manual-url",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SoundDiscoveryOptions {
+    pub limit: u32,
+    pub region: String,
+    pub window_days: u32,
+    pub strategy: SoundDiscoveryStrategy,
+    pub manual_url: Option<String>,
+}
 
 fn debug_enabled() -> bool {
     std::env::var("CAPCUT_DEBUG_DISCOVERY").ok().as_deref() == Some("1")
@@ -1019,12 +1064,177 @@ fn candidates_to_json(
     })
 }
 
-/// Fetch trending sounds programmatically, preferring the Research API and
-/// falling back to Creative Center scraping when access is unavailable.
-pub fn find_trending_sounds(limit: u32, region: &str, window_days: u32) -> Result<serde_json::Value> {
+fn library_sound_score(asset: &crate::models::Asset) -> f64 {
+    let recency = DateTime::parse_from_rfc3339(&asset.downloaded_at)
+        .ok()
+        .map(|dt| {
+            let age_hours = (Utc::now() - dt.with_timezone(&Utc)).num_hours().max(0) as f64;
+            (72.0 - age_hours).max(0.0)
+        })
+        .unwrap_or(0.0);
+    let trending_bonus = if asset.tags.iter().any(|tag| {
+        let lowered = tag.to_ascii_lowercase();
+        lowered.contains("trend") || lowered.contains("tiktok")
+    }) {
+        100.0
+    } else {
+        0.0
+    };
+    recency + trending_bonus + asset.duration_seconds.min(60.0)
+}
+
+fn library_candidates(limit: u32, region: &str, window_days: u32) -> Result<Vec<TrendingSoundCandidate>> {
+    let mut assets = library::list_assets(Some("sound"))?;
+    if assets.is_empty() {
+        bail!("No local sound assets are available in the library.");
+    }
+
+    assets.sort_by(|a, b| {
+        library_sound_score(b)
+            .partial_cmp(&library_sound_score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.downloaded_at.cmp(&a.downloaded_at))
+    });
+
+    let candidates = assets
+        .into_iter()
+        .take(limit as usize)
+        .enumerate()
+        .map(|(index, asset)| TrendingSoundCandidate {
+            rank: (index + 1) as u64,
+            music_id: asset.id.clone(),
+            title: asset.title.clone(),
+            artist: "Library".to_string(),
+            tiktok_url: asset.source_url.clone(),
+            import_url: asset.source_url.clone(),
+            import_hint: format!("Reuse existing library sound asset: {}", asset.id),
+            source_path: "library".to_string(),
+            source_url: asset.source_url.clone(),
+            ranking_score: (library_sound_score(&asset) * 1000.0).round() / 1000.0,
+            video_count: 0,
+            total_views: 0,
+            total_likes: 0,
+            total_comments: 0,
+            total_shares: 0,
+            latest_video_create_time: asset.downloaded_at.clone(),
+            enrichment_source: Some("library_asset".to_string()),
+        })
+        .collect();
+
+    let _ = region;
+    let _ = window_days;
+    Ok(candidates)
+}
+
+fn manual_url_candidates(
+    limit: u32,
+    region: &str,
+    window_days: u32,
+    manual_url: &str,
+) -> Result<Vec<TrendingSoundCandidate>> {
+    let info = downloader::get_info(manual_url).ok();
+    let title = info
+        .as_ref()
+        .and_then(|v| v.get("title"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("Manual sound URL")
+        .to_string();
+    let artist = info
+        .as_ref()
+        .and_then(|v| v.get("uploader"))
+        .and_then(|v| v.as_str())
+        .or_else(|| info.as_ref().and_then(|v| v.get("channel")).and_then(|v| v.as_str()))
+        .unwrap_or("Manual")
+        .to_string();
+
+    let candidate = TrendingSoundCandidate {
+        rank: 1,
+        music_id: "manual-url".to_string(),
+        title,
+        artist,
+        tiktok_url: manual_url.to_string(),
+        import_url: manual_url.to_string(),
+        import_hint: format!("capcut-cli library import \"{manual_url}\" --type sound"),
+        source_path: "manual-url".to_string(),
+        source_url: manual_url.to_string(),
+        ranking_score: 1.0,
+        video_count: 0,
+        total_views: 0,
+        total_likes: 0,
+        total_comments: 0,
+        total_shares: 0,
+        latest_video_create_time: Utc::now().to_rfc3339(),
+        enrichment_source: Some("manual_url".to_string()),
+    };
+
+    let _ = limit;
+    let _ = region;
+    let _ = window_days;
+    Ok(vec![candidate])
+}
+
+/// Fetch trending sounds using an explicit strategy or `auto`.
+pub fn find_trending_sounds_with_options(options: &SoundDiscoveryOptions) -> Result<serde_json::Value> {
+    let limit = options.limit;
+    let region = options.region.as_str();
+    let window_days = options.window_days;
     output::log(&format!(
-        "Fetching trending TikTok sounds (region={region}, window_days={window_days}, limit={limit})..."
+        "Fetching trending TikTok sounds (strategy={}, region={region}, window_days={window_days}, limit={limit})...",
+        options.strategy.as_str()
     ));
+
+    match options.strategy {
+        SoundDiscoveryStrategy::Research => {
+            let candidates = research_candidates(limit, region, window_days)?;
+            if candidates.is_empty() {
+                bail!("TikTok Research API returned no ranked sounds for the requested window.");
+            }
+            output::log("Source: TikTok Research API");
+            return Ok(candidates_to_json(
+                candidates,
+                "tiktok_research_api",
+                region,
+                window_days,
+                true,
+            ));
+        }
+        SoundDiscoveryStrategy::CreativeCenter => {
+            let candidates = fallback_creative_center_sounds(limit, region, window_days)?;
+            return Ok(candidates_to_json(
+                candidates,
+                "tiktok_creative_center",
+                region,
+                window_days,
+                false,
+            ));
+        }
+        SoundDiscoveryStrategy::Library => {
+            let candidates = library_candidates(limit, region, window_days)?;
+            return Ok(candidates_to_json(candidates, "library", region, window_days, false));
+        }
+        SoundDiscoveryStrategy::ManualUrl => {
+            let manual_url = options
+                .manual_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("manual-url strategy requires --sound-url."))?;
+            let candidates = manual_url_candidates(limit, region, window_days, manual_url)?;
+            return Ok(candidates_to_json(candidates, "manual-url", region, window_days, false));
+        }
+        SoundDiscoveryStrategy::Auto => {}
+    }
+
+    if options
+        .manual_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        let manual_url = options.manual_url.as_deref().unwrap();
+        let candidates = manual_url_candidates(limit, region, window_days, manual_url)?;
+        return Ok(candidates_to_json(candidates, "manual-url", region, window_days, false));
+    }
 
     if configured_research_token().is_some() {
         match research_candidates(limit, region, window_days) {
@@ -1048,14 +1258,21 @@ pub fn find_trending_sounds(limit: u32, region: &str, window_days: u32) -> Resul
         }
     }
 
-    let candidates = fallback_creative_center_sounds(limit, region, window_days)?;
-    Ok(candidates_to_json(
-        candidates,
-        "tiktok_creative_center",
-        region,
-        window_days,
-        false,
-    ))
+    match fallback_creative_center_sounds(limit, region, window_days) {
+        Ok(candidates) => Ok(candidates_to_json(
+            candidates,
+            "tiktok_creative_center",
+            region,
+            window_days,
+            false,
+        )),
+        Err(err) => {
+            debug_log(&format!("Creative Center fallback path: {err}"));
+            let candidates = library_candidates(limit, region, window_days)?;
+            output::log("Creative Center discovery failed; falling back to local library sounds.");
+            Ok(candidates_to_json(candidates, "library", region, window_days, false))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1081,6 +1298,60 @@ mod tests {
             tiktok_music_url("7310129403294828545"),
             "https://www.tiktok.com/music/_-7310129403294828545"
         );
+    }
+
+    #[test]
+    fn test_strategy_parse_accepts_aliases() {
+        assert_eq!(
+            SoundDiscoveryStrategy::parse("creative-center").unwrap(),
+            SoundDiscoveryStrategy::CreativeCenter
+        );
+        assert_eq!(
+            SoundDiscoveryStrategy::parse("manual").unwrap(),
+            SoundDiscoveryStrategy::ManualUrl
+        );
+    }
+
+    #[test]
+    fn test_strategy_parse_rejects_unknown_values() {
+        let error = SoundDiscoveryStrategy::parse("totally-unknown").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unknown TikTok sound discovery strategy")
+        );
+    }
+
+    #[test]
+    fn test_manual_url_candidates_use_manual_source() {
+        let candidates = manual_url_candidates(5, "US", 7, "https://www.tiktok.com/music/_-123")
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_path, "manual-url");
+        assert_eq!(candidates[0].import_url, "https://www.tiktok.com/music/_-123");
+    }
+
+    #[test]
+    fn test_find_trending_sounds_with_options_manual_url_returns_manual_method() {
+        let payload = find_trending_sounds_with_options(&SoundDiscoveryOptions {
+            limit: 3,
+            region: "US".to_string(),
+            window_days: 7,
+            strategy: SoundDiscoveryStrategy::ManualUrl,
+            manual_url: Some("https://www.tiktok.com/music/_-123".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(payload.get("method").and_then(|v| v.as_str()), Some("manual-url"));
+        assert_eq!(payload.get("recommended").and_then(|v| v.as_bool()), Some(false));
+    }
+
+    #[test]
+    fn test_library_candidates_return_existing_assets_when_available() {
+        let candidates = library_candidates(10, "US", 7).unwrap();
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].source_path, "library");
     }
 
     #[test]

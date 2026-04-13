@@ -10,7 +10,7 @@ Today the CLI supports:
 
 - checking and installing runtime dependencies
 - discovering trending TikTok sounds through TikTok Research API with Creative Center fallback
-- discovering X/Twitter clips through authenticated API search
+- discovering X/Twitter clips through authenticated API search plus lower-barrier fallback strategies
 - importing sounds and clips into a local JSON-backed library
 - composing a final MP4 from one sound and one or more clips
 - running a one-shot `autopilot` workflow that discovers, imports, and composes automatically
@@ -38,6 +38,15 @@ cargo run -- discover x-clips --query "ai agents" --limit 5 --min-likes 1000
 
 # One-shot agent workflow (discover + import + compose)
 cargo run -- autopilot --query "ai agents" --duration 15
+
+# Lower-barrier sound strategies for agents
+cargo run -- discover tiktok-sounds --strategy library --limit 5
+cargo run -- discover tiktok-sounds --strategy manual-url --sound-url "https://www.tiktok.com/music/_-123"
+
+# Lower-barrier clip strategies for agents
+cargo run -- discover x-clips --query "ai agents" --strategy guided
+cargo run -- discover x-clips --query "ai agents" --strategy library --limit 5
+cargo run -- discover x-clips --query "ai agents" --strategy manual-url --clip-url "https://x.com/user/status/123"
 ```
 
 You can also install the binary locally:
@@ -61,6 +70,7 @@ Notes:
 - Reliable X/Twitter media import expects a logged-in local browser. The downloader tries browsers from `CAPCUT_X_COOKIE_BROWSERS`, or `chrome,safari,firefox,edge` by default.
 - Reliable X/Twitter discovery expects `TWITTER_BEARER_TOKEN`.
 - Official TikTok sound discovery expects `TIKTOK_RESEARCH_ACCESS_TOKEN`; when it is missing, the CLI falls back to best-effort Creative Center scraping.
+- TikTok music imports can still be brittle when upstream extractor behavior changes; when that happens, use `manual-url` with another supported source or import fresh URLs directly into the library.
 
 ## Credential Safety
 
@@ -98,8 +108,9 @@ cargo run -- discover tiktok-sounds --limit 10 --region US --window-days 7
 # X/Twitter discovery (recommended strong-yes path)
 cargo run -- discover x-clips --query "ai agents" --limit 10 --min-likes 1000
 
-# Optional guided fallback when auth is not configured
-cargo run -- discover x-clips --query "ai agents" --allow-guided-fallback
+# Lower-barrier X/Twitter options
+cargo run -- discover x-clips --query "ai agents" --strategy guided
+cargo run -- discover x-clips --query "ai agents" --strategy library --limit 5
 ```
 
 Important behavior:
@@ -107,9 +118,13 @@ Important behavior:
 - `discover tiktok-sounds` first tries the TikTok Research API, then falls back to Creative Center JSON, song-detail crawling, and HTML scraping.
 - `discover tiktok-sounds` returns ranked candidates with `music_id`, `ranking_score`, `source_path`, and an `import_url`; prefer `import_url` when you want the CLI to ingest the sound immediately.
 - `discover tiktok-sounds` uses a rolling discovery window; `--window-days` defaults to `7`.
-- `discover x-clips` requires `TWITTER_BEARER_TOKEN` for the recommended path and returns ranked clip candidates with `import_url`, engagement metrics, and `ranking_score`.
-- `discover x-clips` fails with a structured setup error when auth is missing unless you pass `--allow-guided-fallback`.
-- Guided X discovery still exists, but it is explicitly a fallback mode and not the recommended strong-yes path.
+- `discover tiktok-sounds` supports explicit strategies: `auto`, `research`, `creative-center`, `library`, and `manual-url`.
+- `auto` chooses the lowest-friction working path in this order: `manual-url` when `--sound-url` is provided, then `research` when a token is configured, then `creative-center`, then `library`.
+- `discover x-clips` supports explicit strategies: `auto`, `api`, `guided`, `library`, and `manual-url`.
+- `discover x-clips` returns ranked clip candidates with `import_url`, engagement metrics, and `ranking_score` when the API strategy succeeds.
+- `auto` chooses the lowest-friction working path in this order: `manual-url` when `--clip-url` is provided, then `api` when `TWITTER_BEARER_TOKEN` is configured, then `guided`, then `library`.
+- `guided` returns browser search URLs and an import hint instead of live API results; it is useful when auth is not configured, but it is not the recommended strong-yes path.
+- `library` reuses previously imported clip assets for the fastest fully local workflow.
 
 ### `library`
 
@@ -119,6 +134,8 @@ Manage local media assets stored under `library/`.
 # Import from a supported URL
 cargo run -- library import "https://www.tiktok.com/embed/v2/..." --type sound --tags trending,tiktok
 cargo run -- library import "https://x.com/user/status/123" --type clip --tags viral,demo
+cargo run -- library import "https://www.youtube.com/watch?v=..." --type clip --tags fresh,youtube
+cargo run -- library import "https://www.youtube.com/watch?v=..." --type sound --tags fresh,youtube
 
 # Inspect the library
 cargo run -- library list
@@ -137,6 +154,7 @@ Import behavior:
 - clips are downloaded with `yt-dlp` and stored under `library/clips/<asset_id>/`
 - imported assets are indexed in `library/manifest.json`
 - X/Twitter clip imports use authenticated browser cookies by default and emit distinct structured errors for missing auth, suspended tweets, missing video media, unavailable video, and rate limiting
+- manual URL import is the most reliable way to guarantee fresh content when platform discovery or extractors are temporarily degraded
 
 Supported source platforms currently detected by the downloader:
 
@@ -192,11 +210,38 @@ Run one agent-facing command that:
 3. imports the first successful sound + clip candidates
 4. composes the final MP4
 
+This command works best when:
+- `TIKTOK_RESEARCH_ACCESS_TOKEN` is set for official TikTok sound discovery
+- `TWITTER_BEARER_TOKEN` is set for official X clip discovery
+- a supported local browser is logged into X for media import
+
+Sound strategy options for agents:
+- `auto`: choose the best available option from repo/runtime context
+- `research`: official TikTok Research API path
+- `creative-center`: public scrape with no token, but more brittle
+- `library`: reuse local sound assets for the lowest barrier to entry
+- `manual-url`: use a caller-provided sound URL directly
+
+Clip strategy options for agents:
+- `auto`: choose the best available option from repo/runtime context
+- `api`: official X API path when `TWITTER_BEARER_TOKEN` is configured
+- `guided`: browser-search fallback that returns search URLs and an import hint
+- `library`: reuse local clip assets for the lowest barrier to entry
+- `manual-url`: use a caller-provided X clip URL directly
+
+Practical agent guidance:
+- use `auto` when credentials are configured and freshness matters more than determinism
+- use `library` when you need the fastest guaranteed local success
+- use `manual-url` when you already have a fresh source URL and want the most predictable non-library path
+- if TikTok or X discovery is degraded, importing fresh URLs from another supported platform such as YouTube is still a valid path to a brand-new output
+
 ```bash
 cargo run -- autopilot \
   --query "ai agents" \
   --region US \
   --window-days 7 \
+  --sound-strategy auto \
+  --clip-strategy auto \
   --sound-limit 5 \
   --clip-limit 5 \
   --min-likes 1000 \
@@ -302,7 +347,7 @@ The intended strong-yes flow is:
 
 Or run the same flow in one command:
 
-- `cargo run -- autopilot --query "<topic>" --region US --window-days 7 --duration 15`
+- `cargo run -- autopilot --query "<topic>" --region US --window-days 7 --sound-strategy auto --clip-strategy auto --duration 15`
 
 Expected environment for that path:
 

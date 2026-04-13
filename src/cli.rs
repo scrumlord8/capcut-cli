@@ -131,6 +131,12 @@ enum DiscoverAction {
         /// Rolling discovery window in days.
         #[arg(long = "window-days", default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..))]
         window_days: u32,
+        /// Sound discovery strategy: auto, research, creative-center, library, manual-url.
+        #[arg(long, default_value = "auto")]
+        strategy: String,
+        /// Manual sound URL used when strategy is `manual-url`, or as an `auto` fallback.
+        #[arg(long = "sound-url")]
+        sound_url: Option<String>,
     },
     /// Find viral video clips on X/Twitter.
     #[command(name = "x-clips")]
@@ -144,9 +150,12 @@ enum DiscoverAction {
         /// Minimum likes filter.
         #[arg(long, default_value_t = 1000)]
         min_likes: u64,
-        /// Return guided browser search URLs instead of failing when auth is missing.
-        #[arg(long, default_value_t = false)]
-        allow_guided_fallback: bool,
+        /// Clip discovery strategy: auto, api, guided, library, manual-url.
+        #[arg(long, default_value = "auto")]
+        strategy: String,
+        /// Manual X clip URL used when strategy is `manual-url`, or as an `auto` fallback.
+        #[arg(long = "clip-url")]
+        clip_url: Option<String>,
     },
 }
 
@@ -157,9 +166,30 @@ impl DiscoverArgs {
                 limit,
                 region,
                 window_days,
+                strategy,
+                sound_url,
             } => {
                 let t = Instant::now();
-                match discover::tiktok::find_trending_sounds(limit, &region, window_days) {
+                let strategy = match discover::tiktok::SoundDiscoveryStrategy::parse(&strategy) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        output::emit(&output::error(
+                            "discover tiktok-sounds",
+                            "INVALID_STRATEGY",
+                            &error.to_string(),
+                            None,
+                        ));
+                        std::process::exit(1);
+                    }
+                };
+                let options = discover::tiktok::SoundDiscoveryOptions {
+                    limit,
+                    region: region.clone(),
+                    window_days,
+                    strategy,
+                    manual_url: sound_url,
+                };
+                match discover::tiktok::find_trending_sounds_with_options(&options) {
                     Ok(data) => {
                         output::emit(&output::success("discover tiktok-sounds", data, Some(t)));
                     }
@@ -180,15 +210,30 @@ impl DiscoverArgs {
                 query,
                 limit,
                 min_likes,
-                allow_guided_fallback,
+                strategy,
+                clip_url,
             } => {
                 let t = Instant::now();
-                match discover::twitter::find_viral_clips(
-                    &query,
+                let strategy = match discover::twitter::ClipDiscoveryStrategy::parse(&strategy) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        output::emit(&output::error(
+                            "discover x-clips",
+                            "INVALID_STRATEGY",
+                            &error.to_string(),
+                            None,
+                        ));
+                        std::process::exit(1);
+                    }
+                };
+                let options = discover::twitter::ClipDiscoveryOptions {
+                    query,
                     limit,
                     min_likes,
-                    allow_guided_fallback,
-                ) {
+                    strategy,
+                    manual_url: clip_url,
+                };
+                match discover::twitter::find_viral_clips_with_options(&options) {
                     Ok(data) => {
                         output::emit(&output::success("discover x-clips", data, Some(t)));
                     }
@@ -508,6 +553,22 @@ struct AutoPilotArgs {
     /// Loudness preset or LUFS value.
     #[arg(long)]
     loudness: Option<String>,
+
+    /// Sound discovery strategy: auto, research, creative-center, library, manual-url.
+    #[arg(long = "sound-strategy", default_value = "auto")]
+    sound_strategy: String,
+
+    /// Manual sound URL used when sound strategy is `manual-url`, or as an `auto` fallback.
+    #[arg(long = "sound-url")]
+    sound_url: Option<String>,
+
+    /// Clip discovery strategy: auto, api, guided, library, manual-url.
+    #[arg(long = "clip-strategy", default_value = "auto")]
+    clip_strategy: String,
+
+    /// Manual X clip URL used when clip strategy is `manual-url`, or as an `auto` fallback.
+    #[arg(long = "clip-url")]
+    clip_url: Option<String>,
 }
 
 impl AutoPilotArgs {
@@ -515,11 +576,46 @@ impl AutoPilotArgs {
         let t = Instant::now();
         config::ensure_dirs();
 
-        let sound_discovery = match discover::tiktok::find_trending_sounds(
-            self.sound_limit,
-            &self.region,
-            self.window_days,
-        ) {
+        let sound_strategy = match discover::tiktok::SoundDiscoveryStrategy::parse(&self.sound_strategy) {
+            Ok(value) => value,
+            Err(error) => {
+                output::emit(&output::error(
+                    "autopilot",
+                    "INVALID_SOUND_STRATEGY",
+                    &error.to_string(),
+                    None,
+                ));
+                std::process::exit(1);
+            }
+        };
+        let sound_options = discover::tiktok::SoundDiscoveryOptions {
+            limit: self.sound_limit,
+            region: self.region.clone(),
+            window_days: self.window_days,
+            strategy: sound_strategy,
+            manual_url: self.sound_url.clone(),
+        };
+        let clip_strategy = match discover::twitter::ClipDiscoveryStrategy::parse(&self.clip_strategy) {
+            Ok(value) => value,
+            Err(error) => {
+                output::emit(&output::error(
+                    "autopilot",
+                    "INVALID_CLIP_STRATEGY",
+                    &error.to_string(),
+                    None,
+                ));
+                std::process::exit(1);
+            }
+        };
+        let clip_options = discover::twitter::ClipDiscoveryOptions {
+            query: self.query.clone(),
+            limit: self.clip_limit,
+            min_likes: self.min_likes,
+            strategy: clip_strategy,
+            manual_url: self.clip_url.clone(),
+        };
+
+        let sound_discovery = match discover::tiktok::find_trending_sounds_with_options(&sound_options) {
             Ok(data) => data,
             Err(error) => {
                 output::emit(&output::error(
@@ -532,7 +628,7 @@ impl AutoPilotArgs {
             }
         };
         let clip_discovery =
-            match discover::twitter::find_viral_clips(&self.query, self.clip_limit, self.min_likes, false) {
+            match discover::twitter::find_viral_clips_with_options(&clip_options) {
                 Ok(data) => data,
                 Err(error) => {
                     let hint = if error
@@ -640,6 +736,8 @@ impl AutoPilotArgs {
             "query": self.query,
             "region": self.region,
             "window_days": self.window_days,
+            "sound_strategy": self.sound_strategy,
+            "clip_strategy": self.clip_strategy,
             "selected": {
                 "sound_source_url": sound_source,
                 "clip_source_url": clip_source,
@@ -675,6 +773,15 @@ fn candidate_import_url(candidate: &serde_json::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn candidate_asset_id(candidate: &serde_json::Value) -> Option<String> {
+    candidate
+        .get("asset_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| candidate.get("music_id").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn import_first_success(
     candidates: &[serde_json::Value],
     asset_type: &str,
@@ -683,6 +790,19 @@ fn import_first_success(
     let mut failures = Vec::new();
 
     for candidate in candidates {
+        if candidate.get("source_path").and_then(|v| v.as_str()) == Some("library") {
+            if let Some(asset_id) = candidate_asset_id(candidate) {
+                if let Some(asset) = library::get_asset(&asset_id)? {
+                    return Ok((asset, asset_id, failures));
+                }
+                failures.push(serde_json::json!({
+                    "asset_id": asset_id,
+                    "error": "candidate referenced library asset that no longer exists"
+                }));
+                continue;
+            }
+        }
+
         let Some(url) = candidate_import_url(candidate) else {
             failures.push(serde_json::json!({
                 "reason": "candidate_missing_import_url"
@@ -707,4 +827,88 @@ fn import_first_success(
         anyhow::anyhow!("Autopilot could not import any discovered clip candidate.")
     };
     Err(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::library;
+
+    #[test]
+    fn test_extract_candidates_reads_array_field() {
+        let payload = serde_json::json!({
+            "sounds": [
+                { "import_url": "https://example.com/a" },
+                { "import_url": "https://example.com/b" }
+            ]
+        });
+
+        let candidates = extract_candidates(&payload, "sounds");
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn test_candidate_import_url_skips_blank_values() {
+        let blank = serde_json::json!({ "import_url": "   " });
+        let valid = serde_json::json!({ "import_url": "https://example.com/sound" });
+
+        assert!(candidate_import_url(&blank).is_none());
+        assert_eq!(
+            candidate_import_url(&valid).as_deref(),
+            Some("https://example.com/sound")
+        );
+    }
+
+    #[test]
+    fn test_candidate_asset_id_prefers_asset_id_then_music_id() {
+        let asset = serde_json::json!({
+            "asset_id": "clp_123",
+            "music_id": "snd_456"
+        });
+        let music = serde_json::json!({
+            "music_id": "snd_456"
+        });
+
+        assert_eq!(candidate_asset_id(&asset).as_deref(), Some("clp_123"));
+        assert_eq!(candidate_asset_id(&music).as_deref(), Some("snd_456"));
+    }
+
+    #[test]
+    fn test_import_first_success_reuses_existing_library_asset() {
+        let existing_asset = library::list_assets(Some("sound"))
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("expected at least one sound asset in test library");
+        let candidates = vec![serde_json::json!({
+            "source_path": "library",
+            "asset_id": existing_asset.id,
+            "import_url": "https://example.com/should-not-be-used"
+        })];
+
+        let (asset, source, failures) =
+            import_first_success(&candidates, "sound", &["auto".to_string()]).unwrap();
+
+        assert_eq!(asset.id, existing_asset.id);
+        assert_eq!(source, existing_asset.id);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn test_import_first_success_records_missing_library_asset_failure() {
+        let candidates = vec![serde_json::json!({
+            "source_path": "library",
+            "asset_id": "snd_missing"
+        })];
+
+        let error = import_first_success(&candidates, "sound", &["auto".to_string()])
+            .expect_err("missing library asset should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Autopilot could not import any discovered sound candidate.")
+        );
+    }
 }

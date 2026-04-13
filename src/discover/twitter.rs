@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde_json::json;
 use thiserror::Error;
 
+use crate::library;
 use crate::output;
 
 const TWITTER_SEARCH_V2: &str = "https://api.twitter.com/2/tweets/search/recent";
@@ -17,6 +18,49 @@ pub enum TwitterDiscoveryError {
     ApiRequest { message: String },
     #[error("X/Twitter API returned status {status}.")]
     ApiStatus { status: u16 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipDiscoveryStrategy {
+    Auto,
+    Api,
+    Guided,
+    Library,
+    ManualUrl,
+}
+
+impl ClipDiscoveryStrategy {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "api" | "twitter-api" | "x-api" => Ok(Self::Api),
+            "guided" | "guided-fallback" | "browser" => Ok(Self::Guided),
+            "library" => Ok(Self::Library),
+            "manual-url" | "manual_url" | "manual" => Ok(Self::ManualUrl),
+            other => anyhow::bail!(
+                "Unknown X clip discovery strategy '{other}'. Available: auto, api, guided, library, manual-url."
+            ),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Api => "api",
+            Self::Guided => "guided",
+            Self::Library => "library",
+            Self::ManualUrl => "manual-url",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ClipDiscoveryOptions {
+    pub query: String,
+    pub limit: u32,
+    pub min_likes: u64,
+    pub strategy: ClipDiscoveryStrategy,
+    pub manual_url: Option<String>,
 }
 
 /// Build Twitter advanced search queries with engagement filters.
@@ -115,6 +159,69 @@ fn fallback_guided_discovery(
         "setup_hint": "Set TWITTER_BEARER_TOKEN for official discovery and ensure a logged-in browser is available for X media import.",
         "note": "This is a fallback path. The recommended strong-yes path uses authenticated X discovery plus authenticated media retrieval.",
     })
+}
+
+fn library_candidates(query: &str, limit: u32) -> Result<serde_json::Value> {
+    let mut assets = library::list_assets(Some("clip"))?;
+    assets.sort_by(|a, b| {
+        b.downloaded_at
+            .cmp(&a.downloaded_at)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+
+    let clips: Vec<_> = assets
+        .into_iter()
+        .take(limit as usize)
+        .enumerate()
+        .map(|(index, asset)| {
+            json!({
+                "rank": index + 1,
+                "asset_id": asset.id,
+                "title": asset.title,
+                "tweet_url": asset.source_url,
+                "import_url": asset.source_url,
+                "source_path": "library",
+                "source_platform": asset.source_platform,
+                "duration_seconds": asset.duration_seconds,
+                "downloaded_at": asset.downloaded_at,
+                "ranking_score": ((limit as usize).saturating_sub(index)) as f64,
+                "auth_required_for_import": false,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "method": "library",
+        "recommended": true,
+        "query": query,
+        "clips": clips,
+        "total_found": clips.len(),
+        "import_hint": "Reuse an existing clip asset directly from the local library.",
+        "note": "This is the fastest and most reliable path when fresh X discovery is not required.",
+    }))
+}
+
+fn manual_url_candidates(query: &str, manual_url: &str) -> Result<serde_json::Value> {
+    let trimmed = manual_url.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("manual-url strategy requires a non-empty --clip-url value.");
+    }
+
+    Ok(json!({
+        "method": "manual-url",
+        "recommended": true,
+        "query": query,
+        "clips": [{
+            "rank": 1,
+            "tweet_url": trimmed,
+            "import_url": trimmed,
+            "source_path": "manual-url",
+            "ranking_score": 1.0,
+            "auth_required_for_import": true,
+        }],
+        "total_found": 1,
+        "import_hint": "Import the provided clip URL with: capcut-cli library import <clip_url> --type clip",
+    }))
 }
 
 /// Execute a live search via Twitter API v2 if bearer token is available.
@@ -370,6 +477,68 @@ pub fn find_viral_clips(
     }))
 }
 
+pub fn find_viral_clips_with_options(options: &ClipDiscoveryOptions) -> Result<serde_json::Value> {
+    output::log(&format!(
+        "Searching X/Twitter clips with strategy '{}' for query '{}'...",
+        options.strategy.as_str(),
+        options.query
+    ));
+
+    match options.strategy {
+        ClipDiscoveryStrategy::Auto => {
+            if let Some(url) = options.manual_url.as_deref() {
+                return manual_url_candidates(&options.query, url);
+            }
+
+            if std::env::var("TWITTER_BEARER_TOKEN")
+                .ok()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                if let Ok(results) = find_viral_clips_with_options(&ClipDiscoveryOptions {
+                    query: options.query.clone(),
+                    limit: options.limit,
+                    min_likes: options.min_likes,
+                    strategy: ClipDiscoveryStrategy::Api,
+                    manual_url: None,
+                }) {
+                    return Ok(results);
+                }
+            }
+
+            let guided = find_viral_clips_with_options(&ClipDiscoveryOptions {
+                query: options.query.clone(),
+                limit: options.limit,
+                min_likes: options.min_likes,
+                strategy: ClipDiscoveryStrategy::Guided,
+                manual_url: None,
+            })?;
+
+            let has_urls = guided
+                .get("search_urls")
+                .and_then(|value| value.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false);
+            if has_urls {
+                return Ok(guided);
+            }
+
+            return library_candidates(&options.query, options.limit);
+        }
+        ClipDiscoveryStrategy::Api => {
+            find_viral_clips(&options.query, options.limit, options.min_likes, false)
+        }
+        ClipDiscoveryStrategy::Guided => {
+            find_viral_clips(&options.query, options.limit, options.min_likes, true)
+        }
+        ClipDiscoveryStrategy::Library => library_candidates(&options.query, options.limit),
+        ClipDiscoveryStrategy::ManualUrl => manual_url_candidates(
+            &options.query,
+            options.manual_url.as_deref().unwrap_or(""),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +587,71 @@ mod tests {
 
         assert_eq!(payload.get("recommended").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(payload.get("fallback_mode").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn test_strategy_parse_accepts_aliases() {
+        assert_eq!(
+            ClipDiscoveryStrategy::parse("x-api").unwrap(),
+            ClipDiscoveryStrategy::Api
+        );
+        assert_eq!(
+            ClipDiscoveryStrategy::parse("browser").unwrap(),
+            ClipDiscoveryStrategy::Guided
+        );
+        assert_eq!(
+            ClipDiscoveryStrategy::parse("manual").unwrap(),
+            ClipDiscoveryStrategy::ManualUrl
+        );
+    }
+
+    #[test]
+    fn test_strategy_parse_rejects_unknown_values() {
+        let error = ClipDiscoveryStrategy::parse("totally-unknown").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unknown X clip discovery strategy")
+        );
+    }
+
+    #[test]
+    fn test_manual_url_candidates_use_manual_source() {
+        let payload = manual_url_candidates("ai agents", "https://x.com/openai/status/123").unwrap();
+        let clip = payload
+            .get("clips")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+            .cloned()
+            .unwrap();
+
+        assert_eq!(clip.get("source_path").and_then(|v| v.as_str()), Some("manual-url"));
+        assert_eq!(
+            clip.get("import_url").and_then(|v| v.as_str()),
+            Some("https://x.com/openai/status/123")
+        );
+    }
+
+    #[test]
+    fn test_find_viral_clips_with_options_manual_url_returns_manual_method() {
+        let payload = find_viral_clips_with_options(&ClipDiscoveryOptions {
+            query: "ai agents".to_string(),
+            limit: 3,
+            min_likes: 1000,
+            strategy: ClipDiscoveryStrategy::ManualUrl,
+            manual_url: Some("https://x.com/openai/status/123".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(payload.get("method").and_then(|v| v.as_str()), Some("manual-url"));
+        assert_eq!(payload.get("recommended").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn test_library_candidates_return_existing_assets_when_available() {
+        let payload = library_candidates("ai agents", 3).unwrap();
+        assert_eq!(payload.get("method").and_then(|v| v.as_str()), Some("library"));
+        assert!(payload.get("clips").and_then(|v| v.as_array()).is_some());
     }
 }
