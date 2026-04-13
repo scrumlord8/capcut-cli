@@ -1,0 +1,62 @@
+{
+  "data": {
+    "videos": [
+      {
+        "id": 9001,
+        "create_time": 1712800000,
+        "region_code": "US",
+        "video_description": "alpha",
+        "music_id": 7001,
+        "like_count": 400,
+        "comment_count": 20,
+        "share_count": 15,
+        "view_count": 20000,
+        "username": "creator_a"
+      },
+      {
+        "id": 9002,
+        "create_time": 1712800300,
+        "region_code": "US",
+        "video_description": "beta",
+        "music_id": 7001,
+        "like_count": 320,
+        "comment_count": 18,
+        "share_count": 14,
+        "view_count": 18000,
+        "username": "creator_b"
+      },
+      {
+        "id": 9003,
+        "create_time": 1712790000,
+        "region_code": "US",
+        "video_description": "gamma",
+        "music_id": 7002,
+        "like_count": 5000,
+        "comment_count": 260,
+        "share_count": 110,
+        "view_count": 95000,
+        "username": "creator_c"
+      },
+      {
+        "id": 9004,
+        "create_time": 1712785000,
+        "region_code": "US",
+        "video_description": "delta",
+        "music_id": 7003,
+        "like_count": 120,
+        "comment_count": 5,
+        "share_count": 4,
+        "view_count": 5000,
+        "username": "creator_d"
+      }
+    ],
+    "cursor": 100,
+    "has_more": true,
+    "search_id": "search-1"
+  },
+  "error": {
+    "code": "ok",
+    "message": "",
+    "log_id": "fixture-1"
+  }
+}

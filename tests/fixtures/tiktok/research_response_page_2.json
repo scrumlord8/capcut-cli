@@ -1,0 +1,38 @@
+{
+  "data": {
+    "videos": [
+      {
+        "id": 9101,
+        "create_time": 1712800500,
+        "region_code": "US",
+        "video_description": "epsilon",
+        "music_id": 7001,
+        "like_count": 250,
+        "comment_count": 17,
+        "share_count": 13,
+        "view_count": 15000,
+        "username": "creator_e"
+      },
+      {
+        "id": 9102,
+        "create_time": 1712700000,
+        "region_code": "US",
+        "video_description": "zeta",
+        "music_id": 7004,
+        "like_count": 900,
+        "comment_count": 40,
+        "share_count": 30,
+        "view_count": 32000,
+        "username": "creator_f"
+      }
+    ],
+    "cursor": 200,
+    "has_more": false,
+    "search_id": "search-2"
+  },
+  "error": {
+    "code": "ok",
+    "message": "",
+    "log_id": "fixture-2"
+  }
+}

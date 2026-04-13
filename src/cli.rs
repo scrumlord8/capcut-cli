@@ -25,6 +25,8 @@ enum Command {
     Library(LibraryArgs),
     /// Compose clips with a sound into a final video.
     Compose(ComposeArgs),
+    /// One-shot agent workflow: discover, import, and compose automatically.
+    Autopilot(AutoPilotArgs),
 }
 
 impl Cli {
@@ -34,6 +36,7 @@ impl Cli {
             Command::Discover(args) => args.run(),
             Command::Library(args) => args.run(),
             Command::Compose(args) => args.run(),
+            Command::Autopilot(args) => args.run(),
         }
     }
 }
@@ -125,6 +128,15 @@ enum DiscoverAction {
         /// Region code.
         #[arg(long, default_value = "US")]
         region: String,
+        /// Rolling discovery window in days.
+        #[arg(long = "window-days", default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..))]
+        window_days: u32,
+        /// Sound discovery strategy: auto, research, creative-center, library, manual-url.
+        #[arg(long, default_value = "auto")]
+        strategy: String,
+        /// Manual sound URL used when strategy is `manual-url`, or as an `auto` fallback.
+        #[arg(long = "sound-url")]
+        sound_url: Option<String>,
     },
     /// Find viral video clips on X/Twitter.
     #[command(name = "x-clips")]
@@ -138,15 +150,46 @@ enum DiscoverAction {
         /// Minimum likes filter.
         #[arg(long, default_value_t = 1000)]
         min_likes: u64,
+        /// Clip discovery strategy: auto, api, guided, library, manual-url.
+        #[arg(long, default_value = "auto")]
+        strategy: String,
+        /// Manual X clip URL used when strategy is `manual-url`, or as an `auto` fallback.
+        #[arg(long = "clip-url")]
+        clip_url: Option<String>,
     },
 }
 
 impl DiscoverArgs {
     fn run(self) -> Result<()> {
         match self.action {
-            DiscoverAction::TiktokSounds { limit, region } => {
+            DiscoverAction::TiktokSounds {
+                limit,
+                region,
+                window_days,
+                strategy,
+                sound_url,
+            } => {
                 let t = Instant::now();
-                match discover::tiktok::find_trending_sounds(limit, &region) {
+                let strategy = match discover::tiktok::SoundDiscoveryStrategy::parse(&strategy) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        output::emit(&output::error(
+                            "discover tiktok-sounds",
+                            "INVALID_STRATEGY",
+                            &error.to_string(),
+                            None,
+                        ));
+                        std::process::exit(1);
+                    }
+                };
+                let options = discover::tiktok::SoundDiscoveryOptions {
+                    limit,
+                    region: region.clone(),
+                    window_days,
+                    strategy,
+                    manual_url: sound_url,
+                };
+                match discover::tiktok::find_trending_sounds_with_options(&options) {
                     Ok(data) => {
                         output::emit(&output::success("discover tiktok-sounds", data, Some(t)));
                     }
@@ -156,8 +199,7 @@ impl DiscoverArgs {
                             "DISCOVERY_FAILED",
                             &e.to_string(),
                             Some(
-                                "TikTok endpoints may be rate-limited. Try again later or import \
-                                 sounds manually with 'capcut-cli library import <url>'.",
+                                "Set TIKTOK_RESEARCH_ACCESS_TOKEN for official discovery. If the fallback scraper is failing, try again later or import a sound manually with 'capcut-cli library import <url> --type sound'.",
                             ),
                         ));
                         std::process::exit(1);
@@ -168,18 +210,63 @@ impl DiscoverArgs {
                 query,
                 limit,
                 min_likes,
+                strategy,
+                clip_url,
             } => {
                 let t = Instant::now();
-                match discover::twitter::find_viral_clips(&query, limit, min_likes) {
+                let strategy = match discover::twitter::ClipDiscoveryStrategy::parse(&strategy) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        output::emit(&output::error(
+                            "discover x-clips",
+                            "INVALID_STRATEGY",
+                            &error.to_string(),
+                            None,
+                        ));
+                        std::process::exit(1);
+                    }
+                };
+                let options = discover::twitter::ClipDiscoveryOptions {
+                    query,
+                    limit,
+                    min_likes,
+                    strategy,
+                    manual_url: clip_url,
+                };
+                match discover::twitter::find_viral_clips_with_options(&options) {
                     Ok(data) => {
                         output::emit(&output::success("discover x-clips", data, Some(t)));
                     }
                     Err(e) => {
+                        let (code, hint) = match e
+                            .downcast_ref::<discover::twitter::TwitterDiscoveryError>()
+                        {
+                            Some(discover::twitter::TwitterDiscoveryError::AuthRequired) => (
+                                "X_AUTH_REQUIRED",
+                                Some(
+                                    "Set TWITTER_BEARER_TOKEN for official X discovery, or pass \
+                                     --allow-guided-fallback to get browser search URLs instead.",
+                                ),
+                            ),
+                            Some(discover::twitter::TwitterDiscoveryError::RateLimited) => (
+                                "X_RATE_LIMITED",
+                                Some("Retry later or reduce request frequency."),
+                            ),
+                            Some(discover::twitter::TwitterDiscoveryError::ApiRequest { .. }) => (
+                                "X_API_REQUEST_FAILED",
+                                Some("Verify network access and your TWITTER_BEARER_TOKEN."),
+                            ),
+                            Some(discover::twitter::TwitterDiscoveryError::ApiStatus { .. }) => (
+                                "X_API_STATUS_ERROR",
+                                Some("Verify your TWITTER_BEARER_TOKEN and X API access tier."),
+                            ),
+                            None => ("DISCOVERY_FAILED", None),
+                        };
                         output::emit(&output::error(
                             "discover x-clips",
-                            "DISCOVERY_FAILED",
+                            code,
                             &e.to_string(),
-                            None,
+                            hint,
                         ));
                         std::process::exit(1);
                     }
@@ -250,11 +337,58 @@ impl LibraryArgs {
                         output::emit(&output::success("library import", data, Some(t)));
                     }
                     Err(e) => {
+                        let (code, hint) =
+                            match e.downcast_ref::<media::downloader::DownloadError>() {
+                                Some(media::downloader::DownloadError::XAuthRequired { .. }) => (
+                                    "X_AUTH_REQUIRED",
+                                    Some(
+                                        "Log into X in a supported local browser and rerun the \
+                                         import. Configure CAPCUT_X_COOKIE_BROWSERS if needed.",
+                                    ),
+                                ),
+                                Some(media::downloader::DownloadError::XRateLimited) => (
+                                    "X_RATE_LIMITED",
+                                    Some("Retry later; X temporarily rate-limited media access."),
+                                ),
+                                Some(media::downloader::DownloadError::XSuspended { .. }) => (
+                                    "X_TWEET_SUSPENDED",
+                                    Some("Pick another clip candidate; this tweet is suspended."),
+                                ),
+                                Some(media::downloader::DownloadError::XNoVideo { .. }) => (
+                                    "X_NO_VIDEO",
+                                    Some(
+                                        "Use a tweet URL that actually contains downloadable video \
+                                         media.",
+                                    ),
+                                ),
+                                Some(media::downloader::DownloadError::XVideoUnavailable { .. }) => (
+                                    "X_VIDEO_UNAVAILABLE",
+                                    Some("Pick another clip candidate; this video is unavailable."),
+                                ),
+                                Some(media::downloader::DownloadError::AudioConversionFailed { .. }) => (
+                                    "AUDIO_CONVERSION_FAILED",
+                                    Some("Verify ffmpeg is installed and supports MP3 encoding."),
+                                ),
+                                Some(media::downloader::DownloadError::YtDlpFailure { .. }) => (
+                                    "IMPORT_FAILED",
+                                    Some(
+                                        "Run 'capcut-cli deps check' to verify yt-dlp is \
+                                         installed.",
+                                    ),
+                                ),
+                                None => (
+                                    "IMPORT_FAILED",
+                                    Some(
+                                        "Run 'capcut-cli deps check' to verify yt-dlp is \
+                                         installed.",
+                                    ),
+                                ),
+                            };
                         output::emit(&output::error(
                             "library import",
-                            "IMPORT_FAILED",
+                            code,
                             &e.to_string(),
-                            Some("Run 'capcut-cli deps check' to verify yt-dlp is installed."),
+                            hint,
                         ));
                         std::process::exit(1);
                     }
@@ -383,283 +517,405 @@ impl ComposeArgs {
     }
 }
 
+// ── autopilot ───────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+struct AutoPilotArgs {
+    /// Topic/query used to discover relevant X clips.
+    #[arg(long)]
+    query: String,
+
+    /// Region code used for TikTok sound discovery.
+    #[arg(long, default_value = "US")]
+    region: String,
+
+    /// Rolling window in days for TikTok sound discovery.
+    #[arg(long = "window-days", default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..))]
+    window_days: u32,
+
+    /// Number of sound candidates to discover.
+    #[arg(long = "sound-limit", default_value_t = 5)]
+    sound_limit: u32,
+
+    /// Number of clip candidates to discover.
+    #[arg(long = "clip-limit", default_value_t = 5)]
+    clip_limit: u32,
+
+    /// Minimum likes threshold for clip discovery.
+    #[arg(long, default_value_t = 1000)]
+    min_likes: u64,
+
+    /// Output duration in seconds.
+    #[arg(long, default_value_t = 15.0)]
+    duration: f64,
+
+    /// Output file path. Auto-generated if omitted.
+    #[arg(long)]
+    output: Option<String>,
+
+    /// Output resolution WxH.
+    #[arg(long, default_value = "1080x1920")]
+    resolution: String,
+
+    /// Loudness preset or LUFS value.
+    #[arg(long)]
+    loudness: Option<String>,
+
+    /// Sound discovery strategy: auto, research, creative-center, library, manual-url.
+    #[arg(long = "sound-strategy", default_value = "auto")]
+    sound_strategy: String,
+
+    /// Manual sound URL used when sound strategy is `manual-url`, or as an `auto` fallback.
+    #[arg(long = "sound-url")]
+    sound_url: Option<String>,
+
+    /// Clip discovery strategy: auto, api, guided, library, manual-url.
+    #[arg(long = "clip-strategy", default_value = "auto")]
+    clip_strategy: String,
+
+    /// Manual X clip URL used when clip strategy is `manual-url`, or as an `auto` fallback.
+    #[arg(long = "clip-url")]
+    clip_url: Option<String>,
+}
+
+impl AutoPilotArgs {
+    fn run(self) -> Result<()> {
+        let t = Instant::now();
+        config::ensure_dirs();
+
+        let sound_strategy = match discover::tiktok::SoundDiscoveryStrategy::parse(&self.sound_strategy) {
+            Ok(value) => value,
+            Err(error) => {
+                output::emit(&output::error(
+                    "autopilot",
+                    "INVALID_SOUND_STRATEGY",
+                    &error.to_string(),
+                    None,
+                ));
+                std::process::exit(1);
+            }
+        };
+        let sound_options = discover::tiktok::SoundDiscoveryOptions {
+            limit: self.sound_limit,
+            region: self.region.clone(),
+            window_days: self.window_days,
+            strategy: sound_strategy,
+            manual_url: self.sound_url.clone(),
+        };
+        let clip_strategy = match discover::twitter::ClipDiscoveryStrategy::parse(&self.clip_strategy) {
+            Ok(value) => value,
+            Err(error) => {
+                output::emit(&output::error(
+                    "autopilot",
+                    "INVALID_CLIP_STRATEGY",
+                    &error.to_string(),
+                    None,
+                ));
+                std::process::exit(1);
+            }
+        };
+        let clip_options = discover::twitter::ClipDiscoveryOptions {
+            query: self.query.clone(),
+            limit: self.clip_limit,
+            min_likes: self.min_likes,
+            strategy: clip_strategy,
+            manual_url: self.clip_url.clone(),
+        };
+
+        let sound_discovery = match discover::tiktok::find_trending_sounds_with_options(&sound_options) {
+            Ok(data) => data,
+            Err(error) => {
+                output::emit(&output::error(
+                    "autopilot",
+                    "SOUND_DISCOVERY_FAILED",
+                    &error.to_string(),
+                    Some("Set TIKTOK_RESEARCH_ACCESS_TOKEN or retry later."),
+                ));
+                std::process::exit(1);
+            }
+        };
+        let clip_discovery =
+            match discover::twitter::find_viral_clips_with_options(&clip_options) {
+                Ok(data) => data,
+                Err(error) => {
+                    let hint = if error
+                        .downcast_ref::<discover::twitter::TwitterDiscoveryError>()
+                        .is_some()
+                    {
+                        Some("Set TWITTER_BEARER_TOKEN for official X discovery.")
+                    } else {
+                        None
+                    };
+                    output::emit(&output::error(
+                        "autopilot",
+                        "CLIP_DISCOVERY_FAILED",
+                        &error.to_string(),
+                        hint,
+                    ));
+                    std::process::exit(1);
+                }
+            };
+
+        let sound_candidates = extract_candidates(&sound_discovery, "sounds");
+        if sound_candidates.is_empty() {
+            output::emit(&output::error(
+                "autopilot",
+                "NO_SOUND_CANDIDATES",
+                "No TikTok sound candidates were returned by discovery.",
+                Some("Set TIKTOK_RESEARCH_ACCESS_TOKEN or retry later when Creative Center is available."),
+            ));
+            std::process::exit(1);
+        }
+
+        let clip_candidates = extract_candidates(&clip_discovery, "clips");
+        if clip_candidates.is_empty() {
+            output::emit(&output::error(
+                "autopilot",
+                "NO_CLIP_CANDIDATES",
+                "No X/Twitter clip candidates were returned by discovery.",
+                Some("Set TWITTER_BEARER_TOKEN and retry clip discovery."),
+            ));
+            std::process::exit(1);
+        }
+
+        let sound_tags = vec![
+            "auto".to_string(),
+            "workflow".to_string(),
+            "tiktok".to_string(),
+            "trending".to_string(),
+        ];
+        let clip_tags = vec![
+            "auto".to_string(),
+            "workflow".to_string(),
+            "x".to_string(),
+            "viral".to_string(),
+        ];
+
+        let (sound_asset, sound_source, sound_failures) =
+            match import_first_success(&sound_candidates, "sound", &sound_tags) {
+                Ok(result) => result,
+                Err(error) => {
+                    output::emit(&output::error(
+                        "autopilot",
+                        "SOUND_IMPORT_FAILED",
+                        &error.to_string(),
+                        Some("No discovered sound candidate could be imported."),
+                    ));
+                    std::process::exit(1);
+                }
+            };
+        let (clip_asset, clip_source, clip_failures) =
+            match import_first_success(&clip_candidates, "clip", &clip_tags) {
+                Ok(result) => result,
+                Err(error) => {
+                    output::emit(&output::error(
+                        "autopilot",
+                        "CLIP_IMPORT_FAILED",
+                        &error.to_string(),
+                        Some("No discovered clip candidate could be imported."),
+                    ));
+                    std::process::exit(1);
+                }
+            };
+
+        let composed = match media::compose::run_compose(
+            &sound_asset.id,
+            &[clip_asset.id.clone()],
+            self.duration,
+            self.output.as_deref(),
+            &self.resolution,
+            self.loudness.as_deref(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                output::emit(&output::error(
+                    "autopilot",
+                    "COMPOSE_FAILED",
+                    &error.to_string(),
+                    Some("Discovery and import succeeded, but compose failed."),
+                ));
+                std::process::exit(1);
+            }
+        };
+
+        let data = serde_json::json!({
+            "workflow": "autopilot",
+            "query": self.query,
+            "region": self.region,
+            "window_days": self.window_days,
+            "sound_strategy": self.sound_strategy,
+            "clip_strategy": self.clip_strategy,
+            "selected": {
+                "sound_source_url": sound_source,
+                "clip_source_url": clip_source,
+                "sound_asset_id": sound_asset.id,
+                "clip_asset_id": clip_asset.id,
+            },
+            "attempts": {
+                "sound_candidates_considered": sound_candidates.len(),
+                "clip_candidates_considered": clip_candidates.len(),
+                "sound_import_failures": sound_failures,
+                "clip_import_failures": clip_failures,
+            },
+            "compose": serde_json::to_value(composed)?,
+        });
+
+        output::emit(&output::success("autopilot", data, Some(t)));
+        Ok(())
+    }
+}
+
+fn extract_candidates(data: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+    data.get(key)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn candidate_import_url(candidate: &serde_json::Value) -> Option<String> {
+    candidate
+        .get("import_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn candidate_asset_id(candidate: &serde_json::Value) -> Option<String> {
+    candidate
+        .get("asset_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| candidate.get("music_id").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn import_first_success(
+    candidates: &[serde_json::Value],
+    asset_type: &str,
+    tags: &[String],
+) -> Result<(crate::models::Asset, String, Vec<serde_json::Value>)> {
+    let mut failures = Vec::new();
+
+    for candidate in candidates {
+        if candidate.get("source_path").and_then(|v| v.as_str()) == Some("library") {
+            if let Some(asset_id) = candidate_asset_id(candidate) {
+                if let Some(asset) = library::get_asset(&asset_id)? {
+                    return Ok((asset, asset_id, failures));
+                }
+                failures.push(serde_json::json!({
+                    "asset_id": asset_id,
+                    "error": "candidate referenced library asset that no longer exists"
+                }));
+                continue;
+            }
+        }
+
+        let Some(url) = candidate_import_url(candidate) else {
+            failures.push(serde_json::json!({
+                "reason": "candidate_missing_import_url"
+            }));
+            continue;
+        };
+
+        match library::import_asset(&url, Some(asset_type), tags) {
+            Ok(asset) => return Ok((asset, url, failures)),
+            Err(err) => {
+                failures.push(serde_json::json!({
+                    "import_url": url,
+                    "error": err.to_string(),
+                }));
+            }
+        }
+    }
+
+    let err = if asset_type == "sound" {
+        anyhow::anyhow!("Autopilot could not import any discovered sound candidate.")
+    } else {
+        anyhow::anyhow!("Autopilot could not import any discovered clip candidate.")
+    };
+    Err(err)
+}
+
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
 
-    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(args)
-    }
-
-    // ── deps ───────────────────────────────────────────────────────
+    use crate::library;
 
     #[test]
-    fn parse_deps_check() {
-        let cli = parse(&["capcut-cli", "deps", "check"]).unwrap();
-        assert!(matches!(cli.command, Command::Deps(_)));
-    }
+    fn test_extract_candidates_reads_array_field() {
+        let payload = serde_json::json!({
+            "sounds": [
+                { "import_url": "https://example.com/a" },
+                { "import_url": "https://example.com/b" }
+            ]
+        });
 
-    #[test]
-    fn parse_deps_install() {
-        let cli = parse(&["capcut-cli", "deps", "install"]).unwrap();
-        assert!(matches!(cli.command, Command::Deps(_)));
-    }
-
-    // ── discover ───────────────────────────────────────────────────
-
-    #[test]
-    fn parse_discover_tiktok_sounds_defaults() {
-        let cli = parse(&["capcut-cli", "discover", "tiktok-sounds"]).unwrap();
-        match cli.command {
-            Command::Discover(DiscoverArgs {
-                action: DiscoverAction::TiktokSounds { limit, region },
-            }) => {
-                assert_eq!(limit, 10);
-                assert_eq!(region, "US");
-            }
-            _ => panic!("expected TiktokSounds"),
-        }
+        let candidates = extract_candidates(&payload, "sounds");
+        assert_eq!(candidates.len(), 2);
     }
 
     #[test]
-    fn parse_discover_tiktok_sounds_custom_args() {
-        let cli = parse(&[
-            "capcut-cli", "discover", "tiktok-sounds", "--limit", "20", "--region", "UK",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Discover(DiscoverArgs {
-                action: DiscoverAction::TiktokSounds { limit, region },
-            }) => {
-                assert_eq!(limit, 20);
-                assert_eq!(region, "UK");
-            }
-            _ => panic!("expected TiktokSounds"),
-        }
+    fn test_candidate_import_url_skips_blank_values() {
+        let blank = serde_json::json!({ "import_url": "   " });
+        let valid = serde_json::json!({ "import_url": "https://example.com/sound" });
+
+        assert!(candidate_import_url(&blank).is_none());
+        assert_eq!(
+            candidate_import_url(&valid).as_deref(),
+            Some("https://example.com/sound")
+        );
     }
 
     #[test]
-    fn parse_discover_x_clips() {
-        let cli = parse(&[
-            "capcut-cli", "discover", "x-clips", "--query", "ai agents",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Discover(DiscoverArgs {
-                action:
-                    DiscoverAction::XClips {
-                        query,
-                        limit,
-                        min_likes,
-                    },
-            }) => {
-                assert_eq!(query, "ai agents");
-                assert_eq!(limit, 10);
-                assert_eq!(min_likes, 1000);
-            }
-            _ => panic!("expected XClips"),
-        }
+    fn test_candidate_asset_id_prefers_asset_id_then_music_id() {
+        let asset = serde_json::json!({
+            "asset_id": "clp_123",
+            "music_id": "snd_456"
+        });
+        let music = serde_json::json!({
+            "music_id": "snd_456"
+        });
+
+        assert_eq!(candidate_asset_id(&asset).as_deref(), Some("clp_123"));
+        assert_eq!(candidate_asset_id(&music).as_deref(), Some("snd_456"));
     }
 
     #[test]
-    fn parse_discover_x_clips_requires_query() {
-        let result = parse(&["capcut-cli", "discover", "x-clips"]);
-        assert!(result.is_err());
-    }
+    fn test_import_first_success_reuses_existing_library_asset() {
+        let existing_asset = library::list_assets(Some("sound"))
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("expected at least one sound asset in test library");
+        let candidates = vec![serde_json::json!({
+            "source_path": "library",
+            "asset_id": existing_asset.id,
+            "import_url": "https://example.com/should-not-be-used"
+        })];
 
-    // ── library ────────────────────────────────────────────────────
+        let (asset, source, failures) =
+            import_first_success(&candidates, "sound", &["auto".to_string()]).unwrap();
 
-    #[test]
-    fn parse_library_import() {
-        let cli = parse(&[
-            "capcut-cli",
-            "library",
-            "import",
-            "https://youtube.com/watch?v=test",
-            "--type",
-            "sound",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Library(LibraryArgs {
-                action:
-                    LibraryAction::Import {
-                        url,
-                        asset_type,
-                        tags,
-                    },
-            }) => {
-                assert_eq!(url, "https://youtube.com/watch?v=test");
-                assert_eq!(asset_type.as_deref(), Some("sound"));
-                assert_eq!(tags, "");
-            }
-            _ => panic!("expected Library Import"),
-        }
+        assert_eq!(asset.id, existing_asset.id);
+        assert_eq!(source, existing_asset.id);
+        assert!(failures.is_empty());
     }
 
     #[test]
-    fn parse_library_import_with_tags() {
-        let cli = parse(&[
-            "capcut-cli",
-            "library",
-            "import",
-            "https://example.com/vid",
-            "--tags",
-            "trending,viral",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Library(LibraryArgs {
-                action: LibraryAction::Import { tags, .. },
-            }) => {
-                assert_eq!(tags, "trending,viral");
-            }
-            _ => panic!("expected Library Import"),
-        }
-    }
+    fn test_import_first_success_records_missing_library_asset_failure() {
+        let candidates = vec![serde_json::json!({
+            "source_path": "library",
+            "asset_id": "snd_missing"
+        })];
 
-    #[test]
-    fn parse_library_list_no_filter() {
-        let cli = parse(&["capcut-cli", "library", "list"]).unwrap();
-        match cli.command {
-            Command::Library(LibraryArgs {
-                action: LibraryAction::List { asset_type },
-            }) => {
-                assert!(asset_type.is_none());
-            }
-            _ => panic!("expected Library List"),
-        }
-    }
+        let error = import_first_success(&candidates, "sound", &["auto".to_string()])
+            .expect_err("missing library asset should fail");
 
-    #[test]
-    fn parse_library_list_with_filter() {
-        let cli = parse(&["capcut-cli", "library", "list", "--type", "clip"]).unwrap();
-        match cli.command {
-            Command::Library(LibraryArgs {
-                action: LibraryAction::List { asset_type },
-            }) => {
-                assert_eq!(asset_type.as_deref(), Some("clip"));
-            }
-            _ => panic!("expected Library List"),
-        }
-    }
-
-    #[test]
-    fn parse_library_show() {
-        let cli = parse(&["capcut-cli", "library", "show", "snd_abc123"]).unwrap();
-        match cli.command {
-            Command::Library(LibraryArgs {
-                action: LibraryAction::Show { asset_id },
-            }) => {
-                assert_eq!(asset_id, "snd_abc123");
-            }
-            _ => panic!("expected Library Show"),
-        }
-    }
-
-    #[test]
-    fn parse_library_delete() {
-        let cli = parse(&["capcut-cli", "library", "delete", "clp_xyz789"]).unwrap();
-        match cli.command {
-            Command::Library(LibraryArgs {
-                action: LibraryAction::Delete { asset_id },
-            }) => {
-                assert_eq!(asset_id, "clp_xyz789");
-            }
-            _ => panic!("expected Library Delete"),
-        }
-    }
-
-    // ── compose ────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_compose_minimal() {
-        let cli = parse(&[
-            "capcut-cli", "compose", "--sound", "snd_abc", "--clip", "clp_def",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Compose(args) => {
-                assert_eq!(args.sound, "snd_abc");
-                assert_eq!(args.clips, vec!["clp_def"]);
-                assert_eq!(args.duration(), 30.0);
-                assert_eq!(args.resolution(), "1080x1920");
-                assert!(args.output.is_none());
-                assert!(args.loudness.is_none());
-            }
-            _ => panic!("expected Compose"),
-        }
-    }
-
-    #[test]
-    fn parse_compose_multiple_clips() {
-        let cli = parse(&[
-            "capcut-cli", "compose", "--sound", "snd_abc", "--clip", "clp_1", "--clip", "clp_2",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Compose(args) => {
-                assert_eq!(args.clips, vec!["clp_1", "clp_2"]);
-            }
-            _ => panic!("expected Compose"),
-        }
-    }
-
-    #[test]
-    fn parse_compose_all_options() {
-        let cli = parse(&[
-            "capcut-cli",
-            "compose",
-            "--sound",
-            "snd_abc",
-            "--clip",
-            "clp_def",
-            "--duration",
-            "60",
-            "--output",
-            "/tmp/out.mp4",
-            "--resolution",
-            "720x1280",
-            "--loudness",
-            "podcast",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Compose(args) => {
-                assert_eq!(args.duration(), 60.0);
-                assert_eq!(args.output.as_deref(), Some("/tmp/out.mp4"));
-                assert_eq!(args.resolution(), "720x1280");
-                assert_eq!(args.loudness.as_deref(), Some("podcast"));
-            }
-            _ => panic!("expected Compose"),
-        }
-    }
-
-    #[test]
-    fn parse_compose_requires_sound() {
-        let result = parse(&["capcut-cli", "compose", "--clip", "clp_def"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_compose_requires_clip() {
-        let result = parse(&["capcut-cli", "compose", "--sound", "snd_abc"]);
-        assert!(result.is_err());
-    }
-
-    // ── error cases ────────────────────────────────────────────────
-
-    #[test]
-    fn parse_unknown_command_errors() {
-        let result = parse(&["capcut-cli", "nonexistent"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_no_args_errors() {
-        let result = parse(&["capcut-cli"]);
-        assert!(result.is_err());
+        assert!(
+            error
+                .to_string()
+                .contains("Autopilot could not import any discovered sound candidate.")
+        );
     }
 }

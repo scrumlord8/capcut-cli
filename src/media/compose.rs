@@ -197,6 +197,7 @@ pub fn run_compose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_resolve_loudness_default_is_viral() {
@@ -226,5 +227,37 @@ mod tests {
         let viral = resolve_loudness(Some("viral")).unwrap();
         let podcast = resolve_loudness(Some("podcast")).unwrap();
         assert!(viral.lufs > podcast.lufs);
+    }
+
+    #[test]
+    fn test_compose_smoke_with_existing_library_assets() {
+        let assets = crate::library::list_assets(None).unwrap();
+        let sound = assets
+            .iter()
+            .filter(|asset| asset.asset_type == "sound")
+            .min_by(|a, b| a.duration_seconds.partial_cmp(&b.duration_seconds).unwrap())
+            .expect("expected at least one sound asset in library manifest");
+        let clip = assets
+            .iter()
+            .filter(|asset| asset.asset_type == "clip")
+            .min_by(|a, b| a.duration_seconds.partial_cmp(&b.duration_seconds).unwrap())
+            .expect("expected at least one clip asset in library manifest");
+
+        let out = std::env::temp_dir().join(format!(
+            "capcut-cli-compose-smoke-{}.mp4",
+            uuid::Uuid::new_v4()
+        ));
+        let result = run_compose(
+            &sound.id,
+            &[clip.id.clone()],
+            0.5,
+            Some(out.to_str().unwrap()),
+            "540x960",
+            Some("social"),
+        )
+        .unwrap();
+
+        assert!(Path::new(&result.output_path).exists());
+        let _ = std::fs::remove_file(&result.output_path);
     }
 }

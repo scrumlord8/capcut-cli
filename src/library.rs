@@ -35,6 +35,63 @@ fn write_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+fn sanitize_source_url_for_storage(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+
+    let mut kept = Vec::new();
+    for pair in query.split('&') {
+        let key = pair.split('=').next().unwrap_or("").to_ascii_lowercase();
+        let sensitive = [
+            "token",
+            "access_token",
+            "refresh_token",
+            "authorization",
+            "signature",
+            "sig",
+            "x-signature",
+            "x-amz-signature",
+            "cookie",
+            "cookies",
+        ]
+        .iter()
+        .any(|candidate| key.contains(candidate));
+
+        if !sensitive && !pair.trim().is_empty() {
+            kept.push(pair.to_string());
+        }
+    }
+
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
+}
+
+fn preferred_title(url: &str, info: &serde_json::Value) -> String {
+    let raw = info
+        .get("title")
+        .and_then(|v| v.as_str())
+        .or_else(|| info.get("fulltitle").and_then(|v| v.as_str()))
+        .unwrap_or("Untitled")
+        .trim()
+        .to_string();
+
+    if raw.is_empty() {
+        return "Untitled".to_string();
+    }
+
+    if downloader::detect_platform(url) == "tiktok" && raw.starts_with("TikTok Embed") {
+        if let Some(id) = info.get("id").and_then(|v| v.as_str()) {
+            return format!("TikTok embed {id}");
+        }
+    }
+
+    raw
+}
+
 /// Download and import an asset from a URL.
 pub fn import_asset(url: &str, asset_type: Option<&str>, tags: &[String]) -> Result<Asset> {
     let platform = downloader::detect_platform(url);
@@ -55,10 +112,7 @@ pub fn import_asset(url: &str, asset_type: Option<&str>, tags: &[String]) -> Res
     output::log("Extracting metadata...");
     let (title, meta_duration) = match downloader::get_info(url) {
         Ok(info) => (
-            info.get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Untitled")
-                .to_string(),
+            preferred_title(url, &info),
             info.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0),
         ),
         Err(_) => ("Untitled".to_string(), 0.0),
@@ -88,7 +142,7 @@ pub fn import_asset(url: &str, asset_type: Option<&str>, tags: &[String]) -> Res
         id: asset_id.clone(),
         asset_type: atype.to_string(),
         title: title.clone(),
-        source_url: url.to_string(),
+        source_url: sanitize_source_url_for_storage(url),
         source_platform: platform.to_string(),
         downloaded_at: Utc::now().to_rfc3339(),
         duration_seconds: (duration * 100.0).round() / 100.0,
@@ -174,4 +228,29 @@ pub fn delete_asset(asset_id: &str) -> Result<()> {
     manifest.assets = new_assets;
     write_manifest(&manifest)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_preferred_title_avoids_untitled_embed_assets() {
+        let info = serde_json::json!({
+            "title": "TikTok Embed (1)",
+            "id": "7627284044752882975-1"
+        });
+
+        let title = preferred_title("https://www.tiktok.com/embed/v2/7627284044752882975", &info);
+        assert_eq!(title, "TikTok embed 7627284044752882975-1");
+    }
+
+    #[test]
+    fn test_sanitize_source_url_for_storage_strips_secretish_query_params() {
+        let sanitized = sanitize_source_url_for_storage(
+            "https://cdn.example/audio.mp3?token=abc&expires=60&x-signature=zzz",
+        );
+
+        assert_eq!(sanitized, "https://cdn.example/audio.mp3?expires=60");
+    }
 }

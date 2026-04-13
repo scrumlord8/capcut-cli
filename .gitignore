@@ -1,4 +1,8 @@
 /target
+.env
+.env.*
+!.env.example
+*.local
 
 # Python
 py/.venv/
