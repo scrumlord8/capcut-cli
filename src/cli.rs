@@ -477,6 +477,13 @@ struct ComposeArgs {
     loudness: Option<String>,
 }
 
+// Make ComposeArgs fields accessible for testing
+#[cfg(test)]
+impl ComposeArgs {
+    fn resolution(&self) -> &str { &self.resolution }
+    fn duration(&self) -> f64 { self.duration }
+}
+
 impl ComposeArgs {
     fn run(self) -> Result<()> {
         let t = Instant::now();

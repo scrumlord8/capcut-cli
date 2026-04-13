@@ -520,3 +520,104 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── detect_platform ────────────────────────────────────────────
+
+    #[test]
+    fn detect_platform_tiktok() {
+        assert_eq!(detect_platform("https://www.tiktok.com/@user/video/123"), "tiktok");
+    }
+
+    #[test]
+    fn detect_platform_twitter_x() {
+        assert_eq!(detect_platform("https://x.com/user/status/123"), "twitter");
+        assert_eq!(detect_platform("https://twitter.com/user/status/456"), "twitter");
+    }
+
+    #[test]
+    fn detect_platform_youtube() {
+        assert_eq!(detect_platform("https://www.youtube.com/watch?v=abc"), "youtube");
+        assert_eq!(detect_platform("https://youtu.be/abc"), "youtube");
+    }
+
+    #[test]
+    fn detect_platform_instagram() {
+        assert_eq!(detect_platform("https://www.instagram.com/reel/abc"), "instagram");
+    }
+
+    #[test]
+    fn detect_platform_unknown() {
+        assert_eq!(detect_platform("https://vimeo.com/123"), "unknown");
+    }
+
+    #[test]
+    fn detect_platform_case_insensitive() {
+        assert_eq!(detect_platform("https://WWW.TIKTOK.COM/video"), "tiktok");
+        assert_eq!(detect_platform("https://YOUTUBE.COM/watch"), "youtube");
+    }
+
+    // ── detect_asset_type ──────────────────────────────────────────
+
+    #[test]
+    fn detect_asset_type_explicit_sound() {
+        assert_eq!(detect_asset_type("https://youtube.com/watch?v=x", Some("sound")), "sound");
+    }
+
+    #[test]
+    fn detect_asset_type_explicit_clip() {
+        assert_eq!(detect_asset_type("https://youtube.com/watch?v=x", Some("clip")), "clip");
+    }
+
+    #[test]
+    fn detect_asset_type_explicit_overrides_url() {
+        // Even a TikTok music URL should return "clip" if explicit type says so
+        assert_eq!(
+            detect_asset_type("https://www.tiktok.com/music/something-123", Some("clip")),
+            "clip"
+        );
+    }
+
+    #[test]
+    fn detect_asset_type_tiktok_music_auto() {
+        assert_eq!(
+            detect_asset_type("https://www.tiktok.com/music/trending-song-123", None),
+            "sound"
+        );
+    }
+
+    #[test]
+    fn detect_asset_type_defaults_to_clip() {
+        assert_eq!(detect_asset_type("https://youtube.com/watch?v=x", None), "clip");
+        assert_eq!(detect_asset_type("https://x.com/user/status/123", None), "clip");
+    }
+
+    // ── find_file_matching ─────────────────────────────────────────
+
+    #[test]
+    fn find_file_matching_finds_prefixed_file() {
+        let dir = std::env::temp_dir().join("capcut_test_find");
+        let _ = std::fs::create_dir_all(&dir);
+        let test_file = dir.join("raw_audio.webm");
+        std::fs::write(&test_file, "test").unwrap();
+
+        let found = find_file_matching(&dir, "raw_audio.").unwrap();
+        assert!(found.to_string_lossy().contains("raw_audio."));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_file_matching_errors_when_missing() {
+        let dir = std::env::temp_dir().join("capcut_test_find_empty");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let result = find_file_matching(&dir, "nonexistent.");
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
