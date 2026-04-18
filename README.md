@@ -355,6 +355,47 @@ Expected environment for that path:
 - at least one supported logged-in browser is available locally for X media import
 - `ffmpeg` is installed
 
+## Batch: three finished clips from trending discovery
+
+Two phone-friendly paths that run real discovery and produce three composed
+MP4s plus their real source assets under `clips/`.
+
+Both paths require:
+
+- `TIKTOK_RESEARCH_ACCESS_TOKEN` — for trending TikTok sound discovery
+- `TWITTER_BEARER_TOKEN` — for ranked X clip discovery
+
+### Path A — GitHub Actions (one tap from the mobile app)
+
+1. Add the two tokens under **Settings → Secrets and variables → Actions**.
+2. From the GitHub mobile app: **Actions → build-clips → Run workflow**.
+   Optional inputs: `query`, `region`, `window_days`, `duration`, `resolution`,
+   `min_likes`.
+3. When the run finishes, download the `clips` artifact from the run page.
+
+Caveat: discovery APIs work from Actions runners, but the `yt-dlp` download
+step can be rate-limited or blocked on data-center IPs, and X media import
+has no logged-in browser here. Path B is the more reliable lane.
+
+### Path B — Codespaces (also mobile-viable)
+
+1. Add the two tokens as **Codespace secrets** on this repo.
+2. Open a Codespace from the mobile app (the devcontainer builds the CLI).
+3. In the terminal: `make clips`.
+4. The finished clips and source references land in `./clips/`; download the
+   folder from the Codespace file browser.
+
+### What lands in `clips/`
+
+- `clip_1.mp4`, `clip_2.mp4`, `clip_3.mp4` — finished vertical MP4s
+- `source_sound.mp3` — the real trending audio used by all three
+- `source_1.*`, `source_2.*`, `source_3.*` — the real source clips
+- `manifest.json` — provenance (discovery response snippets for sound + clips)
+
+You can also run the pipeline directly: `./scripts/build-clips.sh`. It accepts
+the same knobs via env vars (`QUERY`, `REGION`, `WINDOW_DAYS`, `DURATION`,
+`RESOLUTION`, `MIN_LIKES`, `CLIPS_DIR`).
+
 ## What changed from the old Python version
 
 - the production CLI is now Rust, built with `clap`

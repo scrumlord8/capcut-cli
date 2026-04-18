@@ -1,0 +1,76 @@
+name: build-clips
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Topic used for X/Twitter clip discovery"
+        default: "ai agents"
+        required: true
+      region:
+        description: "Region code for TikTok sound discovery"
+        default: "US"
+      window_days:
+        description: "Rolling window (days) for TikTok sound discovery"
+        default: "7"
+      duration:
+        description: "Output duration per finished clip (seconds)"
+        default: "15"
+      resolution:
+        description: "Output resolution (WxH)"
+        default: "1080x1920"
+      min_likes:
+        description: "Minimum likes threshold for X clip discovery"
+        default: "1000"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TIKTOK_RESEARCH_ACCESS_TOKEN: ${{ secrets.TIKTOK_RESEARCH_ACCESS_TOKEN }}
+      TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
+      QUERY: ${{ inputs.query }}
+      REGION: ${{ inputs.region }}
+      WINDOW_DAYS: ${{ inputs.window_days }}
+      DURATION: ${{ inputs.duration }}
+      RESOLUTION: ${{ inputs.resolution }}
+      MIN_LIKES: ${{ inputs.min_likes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail fast if API tokens are missing
+        run: |
+          missing=""
+          [[ -z "${TIKTOK_RESEARCH_ACCESS_TOKEN}" ]] && missing+=" TIKTOK_RESEARCH_ACCESS_TOKEN"
+          [[ -z "${TWITTER_BEARER_TOKEN}" ]] && missing+=" TWITTER_BEARER_TOKEN"
+          if [[ -n "$missing" ]]; then
+            echo "Missing required repo secrets:$missing" >&2
+            echo "Add them under Settings → Secrets and variables → Actions." >&2
+            exit 1
+          fi
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
+          python3 -m pip install --quiet --upgrade yt-dlp
+          mkdir -p "$HOME/.capcut-cli/bin"
+          ln -sf "$(command -v yt-dlp)" "$HOME/.capcut-cli/bin/yt-dlp"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build capcut-cli
+        run: cargo build --release
+
+      - name: Discover, import, compose
+        run: ./scripts/build-clips.sh
+
+      - name: Upload clips artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clips
+          path: clips/
+          if-no-files-found: error
+          retention-days: 14
