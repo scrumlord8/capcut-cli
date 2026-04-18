@@ -4,19 +4,20 @@
 !.env.example
 *.local
 
-# Python
-py/.venv/
-py/*.egg-info/
-__pycache__/
-*.pyc
-*.pyo
-dist/
-build/
-*.egg
-
-# Library working files
+# Library working files (runtime-generated assets)
 library/.tmp/
-library/clips/
-library/sounds/assets/
 library/output/
-library/manifest.json
+
+# Ignore non-demo asset directories; un-ignore the committed demo fixtures
+library/clips/*
+!library/clips/clp_demo001
+library/clips/clp_demo001/*
+!library/clips/clp_demo001/video.mp4
+
+library/sounds/assets/*
+!library/sounds/assets/snd_demo001
+library/sounds/assets/snd_demo001/*
+!library/sounds/assets/snd_demo001/audio.mp3
+
+# Agent-run batch outputs (repo-root /clips, not library/clips)
+/clips/

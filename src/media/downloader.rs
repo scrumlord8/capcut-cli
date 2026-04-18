@@ -522,7 +522,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_url_detection {
     use super::*;
 
     // ── detect_platform ────────────────────────────────────────────
