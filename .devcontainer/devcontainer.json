@@ -1,0 +1,17 @@
+{
+  "name": "capcut-cli",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteEnv": {
+    "TIKTOK_RESEARCH_ACCESS_TOKEN": "${localEnv:TIKTOK_RESEARCH_ACCESS_TOKEN}",
+    "TWITTER_BEARER_TOKEN": "${localEnv:TWITTER_BEARER_TOKEN}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+}

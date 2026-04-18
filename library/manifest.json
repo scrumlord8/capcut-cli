@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "id": "snd_demo001",
+      "type": "sound",
+      "title": "Demo sine tone",
+      "source_url": "local_seed://snd_demo001",
+      "source_platform": "local_seed",
+      "downloaded_at": "2026-04-18T00:00:00Z",
+      "duration_seconds": 2.0,
+      "file_path": "library/sounds/assets/snd_demo001/audio.mp3",
+      "file_size_bytes": 33062,
+      "format": "mp3",
+      "tags": ["demo", "seed"]
+    },
+    {
+      "id": "clp_demo001",
+      "type": "clip",
+      "title": "Demo color bars",
+      "source_url": "local_seed://clp_demo001",
+      "source_platform": "local_seed",
+      "downloaded_at": "2026-04-18T00:00:00Z",
+      "duration_seconds": 3.0,
+      "file_path": "library/clips/clp_demo001/video.mp4",
+      "file_size_bytes": 33456,
+      "format": "mp4",
+      "tags": ["demo", "seed"]
+    }
+  ]
+}

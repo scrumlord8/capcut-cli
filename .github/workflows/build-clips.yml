@@ -1,0 +1,121 @@
+name: build-clips
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "urls (primary: caller supplies links) | discovery (optional: requires API tokens)"
+        type: choice
+        default: "urls"
+        options:
+          - urls
+          - discovery
+      # ─── urls-mode inputs ───────────────────────────────────────────
+      sound_url:
+        description: "[urls] Trending sound URL (TikTok music, YouTube, etc.)"
+        required: false
+      clip_url_1:
+        description: "[urls] Source clip URL #1"
+        required: false
+      clip_url_2:
+        description: "[urls] Source clip URL #2"
+        required: false
+      clip_url_3:
+        description: "[urls] Source clip URL #3"
+        required: false
+      # ─── discovery-mode inputs ──────────────────────────────────────
+      query:
+        description: "[discovery] Topic for X/Twitter clip search"
+        default: "ai agents"
+      region:
+        description: "[discovery] TikTok region code"
+        default: "US"
+      window_days:
+        description: "[discovery] TikTok rolling window (days)"
+        default: "7"
+      min_likes:
+        description: "[discovery] X minimum likes threshold"
+        default: "1000"
+      # ─── shared compose knobs ───────────────────────────────────────
+      duration:
+        description: "Output duration per finished clip (seconds)"
+        default: "15"
+      resolution:
+        description: "Output resolution (WxH)"
+        default: "1080x1920"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TIKTOK_RESEARCH_ACCESS_TOKEN: ${{ secrets.TIKTOK_RESEARCH_ACCESS_TOKEN }}
+      TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
+      DURATION: ${{ inputs.duration }}
+      RESOLUTION: ${{ inputs.resolution }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs for selected mode
+        run: |
+          if [[ "${{ inputs.mode }}" == "urls" ]]; then
+            for name in sound_url clip_url_1 clip_url_2 clip_url_3; do
+              val="${{ inputs.sound_url }}${{ inputs.clip_url_1 }}${{ inputs.clip_url_2 }}${{ inputs.clip_url_3 }}"
+            done
+            missing=""
+            [[ -z "${{ inputs.sound_url }}" ]]  && missing+=" sound_url"
+            [[ -z "${{ inputs.clip_url_1 }}" ]] && missing+=" clip_url_1"
+            [[ -z "${{ inputs.clip_url_2 }}" ]] && missing+=" clip_url_2"
+            [[ -z "${{ inputs.clip_url_3 }}" ]] && missing+=" clip_url_3"
+            if [[ -n "$missing" ]]; then
+              echo "urls mode requires:$missing" >&2
+              exit 1
+            fi
+          else
+            missing=""
+            [[ -z "${TIKTOK_RESEARCH_ACCESS_TOKEN}" ]] && missing+=" TIKTOK_RESEARCH_ACCESS_TOKEN"
+            [[ -z "${TWITTER_BEARER_TOKEN}" ]] && missing+=" TWITTER_BEARER_TOKEN"
+            if [[ -n "$missing" ]]; then
+              echo "discovery mode requires repo secrets:$missing" >&2
+              echo "Add them under Settings → Secrets and variables → Actions." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Install ffmpeg and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build capcut-cli
+        run: cargo build --release
+
+      - name: Install yt-dlp via the CLI's own deps bootstrap
+        run: ./target/release/capcut-cli deps install
+
+      - name: Compose (urls mode)
+        if: inputs.mode == 'urls'
+        env:
+          SOUND_URL: ${{ inputs.sound_url }}
+          CLIP_URLS: "${{ inputs.clip_url_1 }} ${{ inputs.clip_url_2 }} ${{ inputs.clip_url_3 }}"
+        run: ./scripts/build-clips-from-urls.sh
+
+      - name: Discover + compose (discovery mode)
+        if: inputs.mode == 'discovery'
+        env:
+          QUERY: ${{ inputs.query }}
+          REGION: ${{ inputs.region }}
+          WINDOW_DAYS: ${{ inputs.window_days }}
+          MIN_LIKES: ${{ inputs.min_likes }}
+        run: ./scripts/build-clips.sh
+
+      - name: Upload clips artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clips
+          path: clips/
+          if-no-files-found: error
+          retention-days: 14

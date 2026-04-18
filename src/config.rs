@@ -35,6 +35,9 @@ pub fn bin_dir() -> PathBuf {
     capcut_home().join("bin")
 }
 pub fn ytdlp_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CAPCUT_YTDLP_PATH") {
+        return PathBuf::from(p);
+    }
     bin_dir().join("yt-dlp")
 }
 
