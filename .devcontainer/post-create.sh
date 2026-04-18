@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot Codespace bootstrap: install ffmpeg, build the CLI, let the CLI
-# install its own yt-dlp binary. No Python toolchain required.
+# fetch its own standalone yt-dlp binary via `deps install`.
 set -euo pipefail
 
 sudo apt-get update
