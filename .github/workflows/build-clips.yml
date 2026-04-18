@@ -49,13 +49,10 @@ jobs:
             exit 1
           fi
 
-      - name: Install system dependencies
+      - name: Install ffmpeg and jq
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg jq
-          python3 -m pip install --quiet --upgrade yt-dlp
-          mkdir -p "$HOME/.capcut-cli/bin"
-          ln -sf "$(command -v yt-dlp)" "$HOME/.capcut-cli/bin/yt-dlp"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -63,6 +60,9 @@ jobs:
 
       - name: Build capcut-cli
         run: cargo build --release
+
+      - name: Install yt-dlp via the CLI's own deps bootstrap
+        run: ./target/release/capcut-cli deps install
 
       - name: Discover, import, compose
         run: ./scripts/build-clips.sh
